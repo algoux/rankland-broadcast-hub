@@ -53,6 +53,7 @@ export default class LiveContestService {
       headers: {
         'x-token': process.env.RL_API_TOKEN || '',
       },
+      validateStatus: (status) => status < 500,
     });
 
     this.apiClient.interceptors.response.use(
