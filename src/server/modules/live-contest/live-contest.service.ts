@@ -1,22 +1,34 @@
 import { Provide, Inject } from 'bwcx-core';
 import type { User } from '@algoux/standard-ranklist';
+import type * as srk from '@algoux/standard-ranklist';
 import axios, { type AxiosInstance, type AxiosResponse } from 'axios';
 import http from 'http';
 import https from 'https';
-import { LiveContest } from '@server/models/live-contest.model';
-import type { LiveContestMember } from '@server/models/live-contest-member.model';
-import MiscUtils from '@server/utils/misc.util';
 import LogicException from '@server/exceptions/logic.exception';
 import { ErrCode } from '@common/enums/err-code.enum';
 
-export type LiveContestMemberInput = Omit<LiveContestMember, 'contestId' | 'createdAt' | 'updatedAt'>;
+export interface LiveContest {
+  alias: string;
+  name: string;
+  contest: srk.Contest;
+  problems: srk.Problem[];
+  markers: srk.Marker[];
+  series: srk.RankSeries[];
+  sorter: srk.Sorter;
+  contributors: srk.Contributor[];
+}
+
+export type LiveContestMember = User & {
+  banned: boolean;
+  broadcasterToken?: string;
+};
 
 @Provide()
 export default class LiveContestService {
   private readonly apiClient: AxiosInstance;
   private readonly baseUrl: string;
 
-  public constructor(@Inject() private readonly miscUtils: MiscUtils) {
+  public constructor() {
     this.baseUrl = (process.env.RL_API_URL || 'https://rl-api-v2.algoux.cn/api').trim();
 
     const httpAgent = new http.Agent({

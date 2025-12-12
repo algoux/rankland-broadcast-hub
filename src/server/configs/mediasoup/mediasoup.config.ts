@@ -1,5 +1,5 @@
 import { Config } from 'bwcx-ljsm';
-import type { RtpCodecCapability } from 'mediasoup/node/lib/rtpParametersTypes';
+import type { RtpCodecCapability } from 'mediasoup/node/lib/RtpParameters';
 
 @Config()
 export default class MediasoupConfig {
