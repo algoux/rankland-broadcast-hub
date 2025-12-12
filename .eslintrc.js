@@ -2,12 +2,10 @@ module.exports = {
   ignorePatterns: [
     'node_modules/**/*',
     'src/common/api/**/*',
-    'src/common/router/**/*',
-    'src/client/router/**/*',
     'scripts/**/*',
     '**/*.js',
   ],
-  extends: ['alloy', 'alloy/vue', 'alloy/typescript'],
+  extends: ['alloy', 'alloy/typescript'],
   parser: 'vue-eslint-parser',
   parserOptions: {
     parser: {
@@ -37,7 +35,9 @@ module.exports = {
   rules: {
     // Customize your rules
     'max-params': 'off',
+    'max-nested-callbacks': 'off',
     '@typescript-eslint/no-unused-vars': 'off',
     '@typescript-eslint/explicit-member-accessibility': 'off',
+    '@typescript-eslint/member-ordering': 'off',
   },
 };

@@ -7,20 +7,18 @@ moduleAlias.addAlias('@server', __dirname);
 moduleAlias.addAlias('@common', require('path').join(__dirname, '../common'));
 
 import { getDependency } from 'bwcx-core';
-import type { IAppConfig, IAppWiredData } from 'bwcx-ljsm';
+import type { IAppConfig } from 'bwcx-ljsm';
 import { App } from 'bwcx-ljsm';
-import BWCX_CONTAINER_KEY from 'bwcx-ljsm/container-key';
-import { ApiClientGenerator } from 'bwcx-api-client/generator';
+import http from 'http';
 import path from 'path';
-import favicon from 'koa-favicon';
-import mount from 'koa-mount';
-import koaStatic from 'koa-static';
+import cors from '@koa/cors';
 import UtilityHeaderMiddleware from './middlewares/utility-header.middleware';
 import LoggerMiddleware from './middlewares/logger.middleware';
 import DefaultResponseHandler from '@server/response-handlers/default.response-handler';
-import { IPageRenderer } from './lib/page-renderer.interface';
-import { BwcxClientVueClientRoutesMapId } from 'bwcx-client-vue/server';
-import { clientRoutesMap } from '@common/router/client-routes';
+import MongoClient from './lib/mongo-client';
+import RedisClient from './lib/redis-client';
+import SocketIOServer from './modules/socket-io/socket-io';
+import MediasoupWorker from './lib/mediasoup-worker';
 
 export default class OurApp extends App {
   protected baseDir = path.join(__dirname, '..');
@@ -33,9 +31,9 @@ export default class OurApp extends App {
     '!./common/api/**',
   ];
 
-  protected hostname = '127.0.0.1';
+  public hostname = process.env.SERVER_HOST || '127.0.0.1';
 
-  protected port = 3000;
+  public port = parseInt(process.env.SERVER_PORT, 10) || 3001;
 
   protected exitTimeout = 5000;
 
@@ -60,68 +58,68 @@ export default class OurApp extends App {
     },
   };
 
-  private pageRenderer: IPageRenderer;
-
   public constructor() {
     super();
-    this.container.bind(BwcxClientVueClientRoutesMapId).toConstantValue(clientRoutesMap);
   }
 
   protected async beforeWire() {
-    // favicon.ico
-    this.instance.use(favicon(`${process.cwd()}/public/favicon.ico`));
-    // serve static files (remove it if use other way to serve static files like CDN)
-    this.instance.use(
-      mount(
-        '/dist',
-        koaStatic(`${process.cwd()}/dist/client/`, {
-          index: false,
-          maxage: 2592000000,
-          extensions: false,
-        }),
-      ),
-    );
-    // SSR
-    this.pageRenderer = getDependency<IPageRenderer>(IPageRenderer, this.container);
-    const renderMiddleware = await this.pageRenderer.init?.();
-    if (renderMiddleware) {
-      this.instance.use(renderMiddleware);
-    }
+    // cors
+    this.instance.use(cors());
   }
 
   protected async afterWire() {
     this.instance.on('error', (error, ctx) => {
       try {
-        console.error('server error', error, ctx);
+        console.error('Server error:', error, ctx);
       } catch (e) {
         console.error(e);
       }
     });
+
+    const mongoClient = getDependency<MongoClient>(MongoClient, this.container);
+    await mongoClient.init();
+    const redisClient = getDependency<RedisClient>(RedisClient, this.container);
+    await redisClient.init();
+    const mediasoupWorker = getDependency<MediasoupWorker>(MediasoupWorker, this.container);
+    await mediasoupWorker.init();
+    await mediasoupWorker.createRouter('default');
   }
 
   protected async afterStart() {
     console.log(`🚀 A bwcx app is listening on http://${this.hostname || '0.0.0.0'}:${this.port}`);
-    if (!isProd) {
-      // generate api client
-      const apiClientGenerator = new ApiClientGenerator(
-        {
-          outFilePath: path.join(this.baseDir, './common/api/api-client.ts'),
-          prependImports: [],
-          enableExtraReqOptions: true,
-        },
-        getDependency<IAppWiredData>(BWCX_CONTAINER_KEY.WiredData, this.container).router,
-      );
-      await apiClientGenerator.generate();
-    }
   }
 
-  protected async beforeExit() {
-    await this.pageRenderer?.destory?.();
+  public async beforeExit() {
+    const mongoClient = getDependency<MongoClient>(MongoClient, this.container);
+    await mongoClient.close();
+    const redisClient = getDependency<RedisClient>(RedisClient, this.container);
+    await redisClient.close();
+    const mediasoupWorker = getDependency<MediasoupWorker>(MediasoupWorker, this.container);
+    mediasoupWorker.close();
+    console.log('Cleaned up before exit');
   }
 }
 
 const app = new OurApp();
 app.scan();
-app.bootstrap().then(() => {
-  app.start();
-});
+app
+  .bootstrap()
+  .then(async () => {
+    const socketIOServer = getDependency<SocketIOServer>(SocketIOServer, app.container);
+    await app.startManually(async () => {
+      const httpServer = http.createServer(app.instance.callback());
+      socketIOServer.init(httpServer);
+      const listenPromise = new Promise((resolve, _reject) => {
+        httpServer.listen(app.port, app.hostname, () => {
+          resolve(true);
+        });
+      });
+      await listenPromise;
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to start the server:', err);
+    app.beforeExit().finally(() => {
+      process.exit(1);
+    });
+  });

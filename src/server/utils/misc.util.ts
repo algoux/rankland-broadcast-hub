@@ -1,5 +1,7 @@
 import type { RequestContext } from 'bwcx-ljsm';
 import { Provide } from 'bwcx-core';
+import Long from 'long';
+import * as srk from '@algoux/standard-ranklist';
 
 @Provide()
 export default class MiscUtils {
@@ -10,5 +12,46 @@ export default class MiscUtils {
       ip = ip.substr(7);
     }
     return ip;
+  }
+
+  public formatTimeDuration(
+    time: srk.TimeDuration,
+    targetUnit: srk.TimeUnit = 'ms',
+    fmt: (num: number) => number = (num) => num,
+  ) {
+    let ms = -1;
+    switch (time[1]) {
+      case 'ms':
+        ms = time[0];
+        break;
+      case 's':
+        ms = time[0] * 1000;
+        break;
+      case 'min':
+        ms = time[0] * 1000 * 60;
+        break;
+      case 'h':
+        ms = time[0] * 1000 * 60 * 60;
+        break;
+      case 'd':
+        ms = time[0] * 1000 * 60 * 60 * 24;
+        break;
+      default:
+        throw new Error(`Invalid source time unit ${time[1]}`);
+    }
+    switch (targetUnit) {
+      case 'ms':
+        return ms;
+      case 's':
+        return fmt(ms / 1000);
+      case 'min':
+        return fmt(ms / 1000 / 60);
+      case 'h':
+        return fmt(ms / 1000 / 60 / 60);
+      case 'd':
+        return fmt(ms / 1000 / 60 / 60 / 24);
+      default:
+        throw new Error(`Invalid target time unit ${targetUnit}`);
+    }
   }
 }

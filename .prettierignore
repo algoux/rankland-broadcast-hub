@@ -1,4 +1,3 @@
 src/common/api/index.ts
 src/common/api/api-client.ts
 src/common/router
-src/client/router

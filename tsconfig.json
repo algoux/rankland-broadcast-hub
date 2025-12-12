@@ -15,8 +15,7 @@
     "baseUrl": ".",
     "paths": {
       "@server/*": ["./src/server/*"],
-      "@common/*": ["./src/common/*"],
-      "@client/*": ["./src/client/*"]
+      "@common/*": ["./src/common/*"]
     }
   },
   "include": ["./src/**/*"],

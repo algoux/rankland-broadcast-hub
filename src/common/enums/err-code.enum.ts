@@ -5,7 +5,20 @@ export enum ErrCode {
   IllegalRequest = -2,
   /** 非法参数 */
   IllegalParameters = -3,
+  /** 未授权 */
+  Unauthorized = -4,
+  /** 无效的授权信息 */
+  InvalidAuthInfo = -5,
 
-  // 自定义逻辑异常错误码
-  // ...
+  // LiveContest
+  LiveContestExisted = 100000,
+  LiveContestNotFound = 100001,
+  LiveContestMemberNotFound = 100002,
+
+  // Broadcast
+  BroadcastNotReady = 200000,
+  BroadcastMediaRoomBroken = 200001,
+  BroadcastMediaRoomPeerMissing = 200002,
+  BroadcastMediaRoomRequiredTrackMissing = 200003,
+  BroadcastMediaRoomCannotConsume = 200004,
 }
