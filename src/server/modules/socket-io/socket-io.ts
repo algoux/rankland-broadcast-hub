@@ -33,7 +33,8 @@ interface MediaRoomPeer {
 }
 
 interface BroadcasterStoreInfo {
-  status: 'ready' | 'producing' | 'disconnected';
+  status: 'ready' | 'broadcasting';
+  broadcastingTrackIds: string[];
 }
 
 interface BroadcasterStoreTracks {
@@ -109,14 +110,8 @@ export default class SocketIOServer {
 
       socket.on('disconnect', async (reason) => {
         console.log(`[socket.disconnect] [${alias}:${userId}] broadcaster:`, broadcasterId, reason);
-        // TODO clear
-        const info = getRedisJsonResp<BroadcasterStoreInfo>(
-          await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
-        );
-        if (info) {
-          info.status = 'disconnected';
-          await this.redis.set(`${this.getBroadcasterRoomKey(alias, userId)}:info`, JSON.stringify(info));
-        }
+        // 粗暴但有效的做法，一旦推流方断连就清空所有，下次需要重新走一套流程
+        await this.clearRoomAndAllData(alias, userId);
       });
 
       registerSocketEvent(socket, 'getContestInfo', async () => {
@@ -136,13 +131,17 @@ export default class SocketIOServer {
         };
       });
 
-      registerSocketEvent(socket, 'confirmReady', async (data) => {
+      /**
+       * confirmReady: 确认准备就绪，服务端创建 media room 并创建 transport
+       */
+      registerSocketEvent(socket, 'confirmReady', async (data: { tracks: BroadcasterStoreTracks[] }) => {
         console.log(`[socket.confirmReady] [${alias}:${userId}] data:`, data);
         socket.join(this.getBroadcasterRoomKey(alias, userId));
         await this.redis.set(
           `${this.getBroadcasterRoomKey(alias, userId)}:info`,
           JSON.stringify({
             status: 'ready',
+            broadcastingTrackIds: [],
           }),
         );
         await this.redis.set(`${this.getBroadcasterRoomKey(alias, userId)}:tracks`, JSON.stringify(data.tracks));
@@ -158,60 +157,47 @@ export default class SocketIOServer {
           transport,
           trackProducers: new Map(),
         };
-        room.broadcaster = broadcasterPeer;
         room.peers.set(broadcasterId, broadcasterPeer);
+        room.broadcaster = broadcasterPeer; // alias to peers[broadcasterId]
         this.mediaRooms.set(roomKey, room);
         console.log(`[socket.confirmReady] [${alias}:${userId}] created media room: ${roomKey}`);
         console.log(`[socket.confirmReady] [${alias}:${userId}] joined broadcaster: ${broadcasterId}`);
 
-        // TODO remove this temp trigger requestStartBroadcast
-        setTimeout(async () => {
-          const info = getRedisJsonResp<BroadcasterStoreInfo>(
-            await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
-          );
-          if (!info || info.status !== 'ready') {
-            return;
-          }
-          const tracks = getRedisJsonResp<BroadcasterStoreTracks[]>(
-            await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:tracks`),
-          );
-          if (!tracks || tracks.length === 0) {
-            return;
-          }
-          console.log(
-            `[socket.confirmReady] [${alias}:${userId}] temp trigger requestStartBroadcast:`,
-            tracks.map((track: any) => track.trackId),
-          );
-          socket.emit('requestStartBroadcast', {
-            trackIds: tracks.map((track: any) => track.trackId),
-            transport: {
-              id: transport.id,
-              iceParameters: transport.iceParameters,
-              iceCandidates: transport.iceCandidates,
-              dtlsParameters: transport.dtlsParameters,
-            },
-            routerRtpCapabilities: this.mediasoupRouter.rtpCapabilities,
-          });
-        }, 2000);
+        // temp trigger requestStartBroadcast
+        // setTimeout(async () => {
+        //   const info = getRedisJsonResp<BroadcasterStoreInfo>(
+        //     await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
+        //   );
+        //   if (!info || info.status !== 'ready') {
+        //     return;
+        //   }
+        //   const tracks = getRedisJsonResp<BroadcasterStoreTracks[]>(
+        //     await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:tracks`),
+        //   );
+        //   if (!tracks || tracks.length === 0) {
+        //     return;
+        //   }
+        //   console.log(
+        //     `[socket.confirmReady] [${alias}:${userId}] temp trigger requestStartBroadcast:`,
+        //     tracks.map((track: any) => track.trackId),
+        //   );
+        //   socket.emit('requestStartBroadcast', {
+        //     trackIds: tracks.map((track: any) => track.trackId),
+        //     transport: {
+        //       id: transport.id,
+        //       iceParameters: transport.iceParameters,
+        //       iceCandidates: transport.iceCandidates,
+        //       dtlsParameters: transport.dtlsParameters,
+        //     },
+        //     routerRtpCapabilities: this.mediasoupRouter.rtpCapabilities,
+        //   });
+        // }, 2000);
       });
 
       registerSocketEvent(socket, 'cancelReady', async () => {
         console.log(`[socket.cancelReady] [${alias}:${userId}]`);
         socket.leave(this.getBroadcasterRoomKey(alias, userId));
-        await this.redis.del(`${this.getBroadcasterRoomKey(alias, userId)}:info`);
-        await this.redis.del(`${this.getBroadcasterRoomKey(alias, userId)}:tracks`);
-
-        const room = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
-        if (room) {
-          room.peers.forEach((peer) => {
-            peer.trackProducers?.forEach((producer) => {
-              producer.close();
-            });
-            peer.transport.close();
-          });
-          room.peers.clear();
-          this.mediaRooms.delete(this.getMediaRoomKey(alias, userId));
-        }
+        await this.clearRoomAndAllData(alias, userId);
       });
 
       registerSocketEvent(socket, 'completeConnectTransport', async (data: { dtlsParameters: DtlsParameters }) => {
@@ -258,8 +244,18 @@ export default class SocketIOServer {
           });
           console.log(`[socket.produce] [${alias}:${userId}] produced track:`, producer.id);
           peer.trackProducers?.set(data.trackId, producer);
+          const info = getRedisJsonResp<BroadcasterStoreInfo>(
+            await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
+          );
+          if (info) {
+            info.status = 'broadcasting';
+            info.broadcastingTrackIds.push(data.trackId);
+            await this.redis.set(`${this.getBroadcasterRoomKey(alias, userId)}:info`, JSON.stringify(info));
+          }
           return {
             producerId: producer.id,
+            type: producer.type,
+            appData: producer.appData,
           };
         },
       );
@@ -287,11 +283,19 @@ export default class SocketIOServer {
       console.log(`[socket.connection] [${alias}:${userId}] viewer:`, viewerId);
       socket.join(this.getViewerRoomKey(alias, userId));
 
+      /**
+       * 断连后此 viewer 相关 peer 信息和 transport 都会被清理，需要重新 joinBroadcastRoom
+       */
       socket.on('disconnect', () => {
         console.log(`[socket.disconnect] [${alias}:${userId}] viewer:`, viewerId);
+        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
+        const peer = mediaRoom?.peers.get(viewerId);
+        peer?.transport.close();
+        mediaRoom?.peers.delete(viewerId);
+        mediaRoom?.viewers.delete(viewerId);
       });
 
-      registerSocketEvent(socket, 'requestBroadcast', async (data: { trackIds: string[] }) => {
+      registerSocketEvent(socket, 'startBroadcast', async (data: { trackIds: string[] }) => {
         const info = getRedisJsonResp<BroadcasterStoreInfo>(
           await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
         );
@@ -316,9 +320,12 @@ export default class SocketIOServer {
         const availableTracks = data.trackIds.filter((trackId) => {
           return tracks.some((track: any) => track.trackId === trackId);
         });
-        console.log(`[socket.requestBroadcast] [${alias}:${userId}] tracks:`, availableTracks);
+        console.log(`[socket.startBroadcast] [${alias}:${userId}] tracks:`, availableTracks);
         if (availableTracks.length > 0) {
-          socket.emit('requestStartBroadcast', {
+          console.log(
+            `[socket.emit.requestStartBroadcast] [${alias}:${userId}] requesting start broadcast to broadcaster`,
+          );
+          this.broadcasterNsp.to(this.getBroadcasterRoomKey(alias, userId)).emit('requestStartBroadcast', {
             trackIds: availableTracks,
             transport: {
               id: broadcasterPeer.transport.id,
@@ -344,7 +351,8 @@ export default class SocketIOServer {
         const viewerPeer: MediaRoomPeer = {
           transport,
         };
-        mediaRoom.viewers.set(viewerId, viewerPeer);
+        mediaRoom.peers.set(viewerId, viewerPeer);
+        mediaRoom.viewers.set(viewerId, viewerPeer); // alias to peers[viewerId]
         console.log(`[socket.joinBroadcastRoom] [${alias}:${userId}] joined viewer:`, viewerId);
         return {
           transport: {
@@ -424,9 +432,42 @@ export default class SocketIOServer {
           console.log(`[socket.consume] [${alias}:${userId}] consumed track:`, consumer.id);
           return {
             consumerId: consumer.id,
+            producerId: producer.id,
+            kind: consumer.kind,
+            rtpParameters: consumer.rtpParameters,
+            type: consumer.type,
+            producerPaused: consumer.producerPaused,
+            appData: consumer.appData,
           };
         },
       );
+
+      registerSocketEvent(socket, 'stopBroadcast', async () => {
+        console.log(`[socket.stopBroadcast] [${alias}:${userId}]`);
+        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
+        if (!mediaRoom) {
+          throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
+        }
+        this.broadcasterNsp.to(this.getBroadcasterRoomKey(alias, userId)).emit('requestStopBroadcast', async () => {
+          console.log(
+            `[socket.emit.requestStopBroadcast] [${alias}:${userId}] received broadcaster ack, cleaning up producers`,
+          );
+          // 仅清理 producers 相关，不关闭 transport
+          const info = getRedisJsonResp<BroadcasterStoreInfo>(
+            await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
+          );
+          if (info) {
+            info.status = 'ready';
+            info.broadcastingTrackIds = [];
+            await this.redis.set(`${this.getBroadcasterRoomKey(alias, userId)}:info`, JSON.stringify(info));
+          }
+          mediaRoom.broadcaster?.trackProducers?.forEach((producer) => {
+            producer.close();
+          });
+          mediaRoom.broadcaster?.trackProducers?.clear();
+          this.viewerNsp.to(this.getViewerRoomKey(alias, userId)).emit('broadcastStopped');
+        });
+      });
     });
   }
 
@@ -449,6 +490,25 @@ export default class SocketIOServer {
       viewers: new Map<string, MediaRoomPeer>(),
     };
     return room;
+  }
+
+  private async clearRoomAndAllData(alias: string, userId: string) {
+    await Promise.all([
+      this.redis.del(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
+      this.redis.del(`${this.getBroadcasterRoomKey(alias, userId)}:tracks`),
+    ]);
+
+    const room = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
+    if (room) {
+      room.broadcaster?.trackProducers?.forEach((producer) => {
+        producer.close();
+      });
+      room.peers.forEach((peer) => {
+        peer.transport.close();
+      });
+      room.peers.clear();
+      this.mediaRooms.delete(this.getMediaRoomKey(alias, userId));
+    }
   }
 }
 
