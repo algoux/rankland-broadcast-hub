@@ -4,6 +4,9 @@ WORKDIR /app
 
 RUN npm install -g pnpm@^8.0.0
 COPY package.json pnpm-lock.yaml ./
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3-pip \
+  && rm -rf /var/lib/apt/lists/*
 RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm run build
