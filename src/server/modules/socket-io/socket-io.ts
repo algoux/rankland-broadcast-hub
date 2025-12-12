@@ -9,13 +9,13 @@ import { errCodeConfigs } from '@server/err-code-configs';
 import { ErrCode } from '@common/enums/err-code.enum';
 import RedisClient from '@server/lib/redis-client';
 import MediasoupWorker from '@server/lib/mediasoup-worker';
-import type { Router } from 'mediasoup/node/lib/RouterTypes';
 import type {
   AppData,
   ConsumerLayers,
   DtlsParameters,
   MediaKind,
   Producer,
+  Router,
   RtpCapabilities,
   RtpParameters,
   WebRtcTransport,

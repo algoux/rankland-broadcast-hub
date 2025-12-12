@@ -15,7 +15,6 @@ import cors from '@koa/cors';
 import UtilityHeaderMiddleware from './middlewares/utility-header.middleware';
 import LoggerMiddleware from './middlewares/logger.middleware';
 import DefaultResponseHandler from '@server/response-handlers/default.response-handler';
-import MongoClient from './lib/mongo-client';
 import RedisClient from './lib/redis-client';
 import SocketIOServer from './modules/socket-io/socket-io';
 import MediasoupWorker from './lib/mediasoup-worker';
@@ -76,8 +75,6 @@ export default class OurApp extends App {
       }
     });
 
-    const mongoClient = getDependency<MongoClient>(MongoClient, this.container);
-    await mongoClient.init();
     const redisClient = getDependency<RedisClient>(RedisClient, this.container);
     await redisClient.init();
     const mediasoupWorker = getDependency<MediasoupWorker>(MediasoupWorker, this.container);
@@ -90,8 +87,6 @@ export default class OurApp extends App {
   }
 
   public async beforeExit() {
-    const mongoClient = getDependency<MongoClient>(MongoClient, this.container);
-    await mongoClient.close();
     const redisClient = getDependency<RedisClient>(RedisClient, this.container);
     await redisClient.close();
     const mediasoupWorker = getDependency<MediasoupWorker>(MediasoupWorker, this.container);
