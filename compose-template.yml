@@ -1,0 +1,19 @@
+version: '3'
+services:
+  be:
+    image: algoux/rankland-broadcast-hub:latest
+    network_mode: host
+    restart: unless-stopped
+    container_name: rankland-broadcast-hub
+    environment:
+      - SERVER_HOST=127.0.0.1
+      - SERVER_PORT=3001
+      - NODE_WORKERS=1
+      - REDIS_HOST=127.0.0.1
+      - REDIS_PORT=6379
+      - REDIS_PASS=
+      - REDIS_DB=0
+      - AUTH_TOKEN=your-auth-token
+      - PUBLIC_IP=your-public-ip
+    volumes:
+      - /your-logs-path/rankland-broadcast-hub:/root/.pm2/logs
