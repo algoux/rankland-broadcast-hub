@@ -125,7 +125,7 @@ export default class SocketIOServer {
        * confirmReady: 确认准备就绪，服务端创建 media room 并创建 transport
        */
       registerSocketEvent(socket, 'confirmReady', async (data: { tracks: BroadcasterStoreTracks }) => {
-        console.log(`[socket.confirmReady] [${alias}:${userId}] data:`, data);
+        console.log(`[socket.confirmReady] [${alias}:${userId}:${broadcasterId}] data:`, data);
         socket.join(this.getBroadcasterRoomKey(alias, userId));
 
         await this.liveContestService.setBroadcasterStoreInfo(alias, userId, {
@@ -152,8 +152,8 @@ export default class SocketIOServer {
         room.peers.set(broadcasterId, broadcasterPeer);
         room.broadcaster = broadcasterPeer; // alias to peers[broadcasterId]
         this.mediaRooms.set(roomKey, room);
-        console.log(`[socket.confirmReady] [${alias}:${userId}] created media room: ${roomKey}`);
-        console.log(`[socket.confirmReady] [${alias}:${userId}] joined broadcaster: ${broadcasterId}`);
+        console.log(`[socket.confirmReady] [${alias}:${userId}:${broadcasterId}] created media room: ${roomKey}`);
+        console.log(`[socket.confirmReady] [${alias}:${userId}:${broadcasterId}] joined broadcaster: ${broadcasterId}`);
 
         // temp trigger requestStartBroadcast
         // setTimeout(async () => {
@@ -175,13 +175,13 @@ export default class SocketIOServer {
       });
 
       registerSocketEvent(socket, 'cancelReady', async () => {
-        console.log(`[socket.cancelReady] [${alias}:${userId}]`);
+        console.log(`[socket.cancelReady] [${alias}:${userId}:${broadcasterId}]`);
         socket.leave(this.getBroadcasterRoomKey(alias, userId));
         await this.clearRoomAndAllData(alias, userId);
       });
 
       registerSocketEvent(socket, 'completeConnectTransport', async (data: { dtlsParameters: DtlsParameters }) => {
-        console.log(`[socket.completeConnectTransport] [${alias}:${userId}] data:`, data);
+        console.log(`[socket.completeConnectTransport] [${alias}:${userId}:${broadcasterId}] data:`, data);
         const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
         if (!mediaRoom) {
           throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
@@ -194,7 +194,7 @@ export default class SocketIOServer {
           dtlsParameters: data.dtlsParameters,
         });
         console.log(
-          `[socket.completeConnectTransport] [${alias}:${userId}] connected to transport:`,
+          `[socket.completeConnectTransport] [${alias}:${userId}:${broadcasterId}] connected to transport:`,
           peer.transport.id,
         );
       });
@@ -203,7 +203,7 @@ export default class SocketIOServer {
         socket,
         'produce',
         async (data: { trackId: string; kind: MediaKind; rtpParameters: RtpParameters }) => {
-          console.log(`[socket.produce] [${alias}:${userId}] data:`, data);
+          console.log(`[socket.produce] [${alias}:${userId}:${broadcasterId}] data:`, data);
           const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
           if (!mediaRoom) {
             throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
@@ -222,7 +222,7 @@ export default class SocketIOServer {
               trackId: data.trackId,
             },
           });
-          console.log(`[socket.produce] [${alias}:${userId}] produced track:`, producer.id);
+          console.log(`[socket.produce] [${alias}:${userId}:${broadcasterId}] produced track:`, producer.id);
           peer.trackProducers?.set(data.trackId, producer);
           const info = await this.liveContestService.getBroadcasterStoreInfo(alias, userId);
           if (info) {
@@ -275,7 +275,7 @@ export default class SocketIOServer {
 
       registerSocketEvent(socket, 'startBroadcast', async (data: { trackIds: string[] }) => {
         const info = await this.liveContestService.getBroadcasterStoreInfo(alias, userId);
-        if (!info || info.status !== 'ready') {
+        if (!info || !['ready', 'broadcasting'].includes(info.status)) {
           throw new LogicException(ErrCode.BroadcastNotReady);
         }
         const tracks = await this.liveContestService.getBroadcasterStoreTracks(alias, userId);
@@ -294,10 +294,10 @@ export default class SocketIOServer {
         const availableTracks = data.trackIds.filter((trackId) => {
           return tracks.some((track: any) => track.trackId === trackId);
         });
-        console.log(`[socket.startBroadcast] [${alias}:${userId}] tracks:`, availableTracks);
+        console.log(`[socket.startBroadcast] [${alias}:${userId}:${viewerId}] checking available tracks:`, availableTracks);
         if (availableTracks.length > 0) {
           console.log(
-            `[socket.emit.requestStartBroadcast] [${alias}:${userId}] requesting start broadcast to broadcaster`,
+            `[socket.emit.requestStartBroadcast] [${alias}:${userId}:${viewerId}] requesting start broadcast to broadcaster`,
           );
           this.broadcasterNsp.to(this.getBroadcasterRoomKey(alias, userId)).emit('requestStartBroadcast', {
             trackIds: availableTracks,
@@ -327,7 +327,7 @@ export default class SocketIOServer {
         };
         mediaRoom.peers.set(viewerId, viewerPeer);
         mediaRoom.viewers.set(viewerId, viewerPeer); // alias to peers[viewerId]
-        console.log(`[socket.joinBroadcastRoom] [${alias}:${userId}] joined viewer:`, viewerId);
+        console.log(`[socket.joinBroadcastRoom] [${alias}:${userId}:${viewerId}] joined viewer:`, viewerId);
         return {
           transport: {
             id: transport.id,
@@ -340,7 +340,7 @@ export default class SocketIOServer {
       });
 
       registerSocketEvent(socket, 'completeConnectTransport', async (data: { dtlsParameters: DtlsParameters }) => {
-        console.log(`[socket.completeConnectTransport] [${alias}:${userId}] data:`, data);
+        console.log(`[socket.completeConnectTransport] [${alias}:${userId}:${viewerId}] data:`, data);
         const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
         if (!mediaRoom) {
           throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
@@ -353,7 +353,7 @@ export default class SocketIOServer {
           dtlsParameters: data.dtlsParameters,
         });
         console.log(
-          `[socket.completeConnectTransport] [${alias}:${userId}] connected to transport:`,
+          `[socket.completeConnectTransport] [${alias}:${userId}:${viewerId}] connected to transport:`,
           peer.transport.id,
         );
       });
@@ -367,7 +367,7 @@ export default class SocketIOServer {
           paused?: boolean;
           preferredLayers?: ConsumerLayers;
         }) => {
-          console.log(`[socket.consume] [${alias}:${userId}] data:`, data);
+          console.log(`[socket.consume] [${alias}:${userId}:${viewerId}] data:`, data);
           const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
           if (!mediaRoom) {
             throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
@@ -403,7 +403,7 @@ export default class SocketIOServer {
               trackId: data.trackId,
             },
           });
-          console.log(`[socket.consume] [${alias}:${userId}] consumed track:`, consumer.id);
+          console.log(`[socket.consume] [${alias}:${userId}:${viewerId}] consumed track:`, consumer.id);
           return {
             consumerId: consumer.id,
             producerId: producer.id,
@@ -417,14 +417,14 @@ export default class SocketIOServer {
       );
 
       registerSocketEvent(socket, 'stopBroadcast', async () => {
-        console.log(`[socket.stopBroadcast] [${alias}:${userId}]`);
+        console.log(`[socket.stopBroadcast] [${alias}:${userId}:${viewerId}]`);
         const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
         if (!mediaRoom) {
           throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
         }
         this.broadcasterNsp.to(this.getBroadcasterRoomKey(alias, userId)).emit('requestStopBroadcast', async () => {
           console.log(
-            `[socket.emit.requestStopBroadcast] [${alias}:${userId}] received broadcaster ack, cleaning up producers`,
+            `[socket.emit.requestStopBroadcast] [${alias}:${userId}:${viewerId}] received broadcaster ack, cleaning up producers`,
           );
           // 仅清理 producers 相关，不关闭 transport
           const info = await this.liveContestService.getBroadcasterStoreInfo(alias, userId);
