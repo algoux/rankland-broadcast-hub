@@ -3,7 +3,7 @@ import { Namespace, Server, Socket } from 'socket.io';
 import type http from 'http';
 import Redis from 'ioredis';
 import type { DefaultEventsMap } from 'socket.io/dist/typed-events';
-import LiveContestService from '../live-contest/live-contest.service';
+import LiveContestService, { BroadcasterStoreTracks } from '../live-contest/live-contest.service';
 import LogicException from '@server/exceptions/logic.exception';
 import { errCodeConfigs } from '@server/err-code-configs';
 import { ErrCode } from '@common/enums/err-code.enum';
@@ -30,16 +30,6 @@ interface MediaRoom {
 interface MediaRoomPeer {
   transport: WebRtcTransport;
   trackProducers?: Map</** trackId */ string, Producer>;
-}
-
-interface BroadcasterStoreInfo {
-  status: 'ready' | 'broadcasting';
-  broadcastingTrackIds: string[];
-}
-
-interface BroadcasterStoreTracks {
-  trackIds: string[];
-  type: 'screen' | 'camera' | 'microphone';
 }
 
 @Provide()
@@ -134,17 +124,19 @@ export default class SocketIOServer {
       /**
        * confirmReady: 确认准备就绪，服务端创建 media room 并创建 transport
        */
-      registerSocketEvent(socket, 'confirmReady', async (data: { tracks: BroadcasterStoreTracks[] }) => {
+      registerSocketEvent(socket, 'confirmReady', async (data: { tracks: BroadcasterStoreTracks }) => {
         console.log(`[socket.confirmReady] [${alias}:${userId}] data:`, data);
         socket.join(this.getBroadcasterRoomKey(alias, userId));
-        await this.redis.set(
-          `${this.getBroadcasterRoomKey(alias, userId)}:info`,
-          JSON.stringify({
-            status: 'ready',
-            broadcastingTrackIds: [],
-          }),
-        );
-        await this.redis.set(`${this.getBroadcasterRoomKey(alias, userId)}:tracks`, JSON.stringify(data.tracks));
+
+        await this.liveContestService.setBroadcasterStoreInfo(alias, userId, {
+          status: 'ready',
+          tracks: data.tracks.map((track) => ({
+            trackId: track.trackId,
+            type: track.type,
+          })),
+          broadcastingTrackIds: [],
+        });
+        await this.liveContestService.setBroadcasterStoreTracks(alias, userId, data.tracks);
 
         const transport = await this.mediasoupRouter.createWebRtcTransport({
           listenIps: [{ ip: '0.0.0.0', announcedIp: process.env.PUBLIC_IP || '127.0.0.1' }],
@@ -165,18 +157,6 @@ export default class SocketIOServer {
 
         // temp trigger requestStartBroadcast
         // setTimeout(async () => {
-        //   const info = getRedisJsonResp<BroadcasterStoreInfo>(
-        //     await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
-        //   );
-        //   if (!info || info.status !== 'ready') {
-        //     return;
-        //   }
-        //   const tracks = getRedisJsonResp<BroadcasterStoreTracks[]>(
-        //     await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:tracks`),
-        //   );
-        //   if (!tracks || tracks.length === 0) {
-        //     return;
-        //   }
         //   console.log(
         //     `[socket.confirmReady] [${alias}:${userId}] temp trigger requestStartBroadcast:`,
         //     tracks.map((track: any) => track.trackId),
@@ -244,13 +224,11 @@ export default class SocketIOServer {
           });
           console.log(`[socket.produce] [${alias}:${userId}] produced track:`, producer.id);
           peer.trackProducers?.set(data.trackId, producer);
-          const info = getRedisJsonResp<BroadcasterStoreInfo>(
-            await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
-          );
+          const info = await this.liveContestService.getBroadcasterStoreInfo(alias, userId);
           if (info) {
             info.status = 'broadcasting';
             info.broadcastingTrackIds.push(data.trackId);
-            await this.redis.set(`${this.getBroadcasterRoomKey(alias, userId)}:info`, JSON.stringify(info));
+            await this.liveContestService.setBroadcasterStoreInfo(alias, userId, info);
           }
           return {
             producerId: producer.id,
@@ -296,15 +274,11 @@ export default class SocketIOServer {
       });
 
       registerSocketEvent(socket, 'startBroadcast', async (data: { trackIds: string[] }) => {
-        const info = getRedisJsonResp<BroadcasterStoreInfo>(
-          await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
-        );
+        const info = await this.liveContestService.getBroadcasterStoreInfo(alias, userId);
         if (!info || info.status !== 'ready') {
           throw new LogicException(ErrCode.BroadcastNotReady);
         }
-        const tracks = getRedisJsonResp<BroadcasterStoreTracks[]>(
-          await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:tracks`),
-        );
+        const tracks = await this.liveContestService.getBroadcasterStoreTracks(alias, userId);
         if (!tracks || tracks.length === 0) {
           throw new LogicException(ErrCode.BroadcastNotReady);
         }
@@ -453,13 +427,11 @@ export default class SocketIOServer {
             `[socket.emit.requestStopBroadcast] [${alias}:${userId}] received broadcaster ack, cleaning up producers`,
           );
           // 仅清理 producers 相关，不关闭 transport
-          const info = getRedisJsonResp<BroadcasterStoreInfo>(
-            await this.redis.get(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
-          );
+          const info = await this.liveContestService.getBroadcasterStoreInfo(alias, userId);
           if (info) {
             info.status = 'ready';
             info.broadcastingTrackIds = [];
-            await this.redis.set(`${this.getBroadcasterRoomKey(alias, userId)}:info`, JSON.stringify(info));
+            await this.liveContestService.setBroadcasterStoreInfo(alias, userId, info);
           }
           mediaRoom.broadcaster?.trackProducers?.forEach((producer) => {
             producer.close();
@@ -494,8 +466,8 @@ export default class SocketIOServer {
 
   private async clearRoomAndAllData(alias: string, userId: string) {
     await Promise.all([
-      this.redis.del(`${this.getBroadcasterRoomKey(alias, userId)}:info`),
-      this.redis.del(`${this.getBroadcasterRoomKey(alias, userId)}:tracks`),
+      this.liveContestService.delBroadcasterStoreInfo(alias, userId),
+      this.liveContestService.delBroadcasterStoreTracks(alias, userId),
     ]);
 
     const room = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
@@ -554,15 +526,4 @@ function wrapSocketHandler(event: string, handler: (data: any) => Promise<any> |
 
 function registerSocketEvent(socket: Socket, event: string, handler: (data: any) => Promise<any> | any) {
   socket.on(event, wrapSocketHandler(event, handler));
-}
-
-function getRedisJsonResp<T>(redisResp: string | null): T | null {
-  if (!redisResp) {
-    return null;
-  }
-  try {
-    return JSON.parse(redisResp);
-  } catch (e) {
-    return null;
-  }
 }

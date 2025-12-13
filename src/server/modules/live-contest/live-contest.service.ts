@@ -6,6 +6,8 @@ import http from 'http';
 import https from 'https';
 import LogicException from '@server/exceptions/logic.exception';
 import { ErrCode } from '@common/enums/err-code.enum';
+import Redis from 'ioredis';
+import RedisClient from '@server/lib/redis-client';
 
 export interface LiveContest {
   alias: string;
@@ -23,12 +25,31 @@ export type LiveContestMember = User & {
   broadcasterToken?: string;
 };
 
+export interface BroadcasterStoreInfo {
+  status: 'ready' | 'broadcasting';
+  tracks: {
+    trackId: string;
+    type: 'screen' | 'camera' | 'microphone';
+  }[];
+  broadcastingTrackIds: string[];
+}
+
+export interface BroadcasterStoreTrackItem {
+  trackId: string;
+  type: 'screen' | 'camera' | 'microphone';
+  // other fields...
+}
+
+export type BroadcasterStoreTracks = BroadcasterStoreTrackItem[];
+
 @Provide()
 export default class LiveContestService {
+  private readonly redis: Redis;
   private readonly apiClient: AxiosInstance;
   private readonly baseUrl: string;
 
-  public constructor() {
+  public constructor(@Inject() private readonly redisClient: RedisClient) {
+    this.redis = this.redisClient.getClient();
     this.baseUrl = (process.env.RL_API_URL || 'https://rl-api-v2.algoux.cn/api').trim();
 
     const httpAgent = new http.Agent({
@@ -120,6 +141,79 @@ export default class LiveContestService {
         return null;
       }
       throw error;
+    }
+  }
+
+  public async getBroadcasterStoreInfo(alias: string, userId: string): Promise<BroadcasterStoreInfo | null> {
+    return this.getRedisJsonResp<BroadcasterStoreInfo>(
+      await this.redis.hget(this.getBroadcasterStoreInfoHashKey(alias), userId),
+    );
+  }
+
+  public async getAllBroadcasterStoreInfo(alias: string): Promise<Record<string, BroadcasterStoreInfo>> {
+    const res = await this.redis.hgetall(this.getBroadcasterStoreInfoHashKey(alias));
+    const obj: Record<string, BroadcasterStoreInfo> = {};
+    Object.keys(res).forEach((userId) => {
+      obj[userId] = this.getRedisJsonResp<BroadcasterStoreInfo>(res[userId]);
+    });
+    return obj;
+  }
+
+  public async setBroadcasterStoreInfo(alias: string, userId: string, info: BroadcasterStoreInfo): Promise<void> {
+    await this.redis.hset(this.getBroadcasterStoreInfoHashKey(alias), userId, JSON.stringify(info));
+    // TODO temp hardcode expire time
+    await this.redis.expire(this.getBroadcasterStoreInfoHashKey(alias), 60 * 60 * 24);
+  }
+
+  public async delBroadcasterStoreInfo(alias: string, userId: string): Promise<void> {
+    await this.redis.hdel(this.getBroadcasterStoreInfoHashKey(alias), userId);
+  }
+
+  public async getBroadcasterStoreTracks(alias: string, userId: string): Promise<BroadcasterStoreTracks | null> {
+    return this.getRedisJsonResp<BroadcasterStoreTracks>(
+      await this.redis.hget(this.getBroadcasterStoreTracksHashKey(alias), userId),
+    );
+  }
+
+  public async getAllBroadcasterStoreTracks(alias: string): Promise<Record<string, BroadcasterStoreTracks>> {
+    const res = await this.redis.hgetall(this.getBroadcasterStoreTracksHashKey(alias));
+    const obj: Record<string, BroadcasterStoreTracks> = {};
+    Object.keys(res).forEach((userId) => {
+      obj[userId] = this.getRedisJsonResp<BroadcasterStoreTracks>(res[userId]);
+    });
+    return obj;
+  }
+
+  public async setBroadcasterStoreTracks(
+    alias: string,
+    userId: string,
+    tracks: BroadcasterStoreTracks,
+  ): Promise<void> {
+    await this.redis.hset(this.getBroadcasterStoreTracksHashKey(alias), userId, JSON.stringify(tracks));
+    // TODO temp hardcode expire time
+    await this.redis.expire(this.getBroadcasterStoreTracksHashKey(alias), 60 * 60 * 24);
+  }
+
+  public async delBroadcasterStoreTracks(alias: string, userId: string): Promise<void> {
+    await this.redis.hdel(this.getBroadcasterStoreTracksHashKey(alias), userId);
+  }
+
+  public getBroadcasterStoreInfoHashKey(alias: string) {
+    return `broadcaster:${alias}:info`;
+  }
+
+  public getBroadcasterStoreTracksHashKey(alias: string) {
+    return `broadcaster:${alias}:tracks`;
+  }
+
+  private getRedisJsonResp<T>(redisResp: string | null): T | null {
+    if (!redisResp) {
+      return null;
+    }
+    try {
+      return JSON.parse(redisResp);
+    } catch (e) {
+      return null;
     }
   }
 }
