@@ -5,7 +5,7 @@ export class GetContestAllBroadcasterInfoReqDTO {
   @FromQuery()
   @IsString()
   @IsNotEmpty()
-  public alias: string;
+  public uca: string;
 }
 
 export class GetContestAllBroadcasterInfoRespDTOItem {

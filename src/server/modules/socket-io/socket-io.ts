@@ -1,13 +1,11 @@
 import { Inject, Provide } from 'bwcx-core';
 import { Namespace, Server, Socket } from 'socket.io';
 import type http from 'http';
-import Redis from 'ioredis';
 import type { DefaultEventsMap } from 'socket.io/dist/typed-events';
 import LiveContestService, { BroadcasterStoreTracks } from '../live-contest/live-contest.service';
 import LogicException from '@server/exceptions/logic.exception';
 import { errCodeConfigs } from '@server/err-code-configs';
 import { ErrCode } from '@common/enums/err-code.enum';
-import RedisClient from '@server/lib/redis-client';
 import MediasoupWorker from '@server/lib/mediasoup-worker';
 import type {
   AppData,
@@ -34,16 +32,13 @@ interface MediaRoomPeer {
 
 @Provide()
 export default class SocketIOServer {
-  private redis: Redis;
   private mediasoupRouter: Router<AppData>;
   private mediaRooms: Map<string, MediaRoom> = new Map();
 
   public constructor(
     @Inject() private readonly liveContestService: LiveContestService,
-    @Inject() private readonly redisClient: RedisClient,
     @Inject() private readonly mediasoupWorker: MediasoupWorker,
   ) {
-    this.redis = this.redisClient.getClient();
     this.mediasoupRouter = this.mediasoupWorker.routerMap.get('default');
   }
 
@@ -62,7 +57,6 @@ export default class SocketIOServer {
   public mount() {
     this.rootMount();
     this.broadcasterMount();
-    this.viewerMount();
   }
 
   public rootMount() {
@@ -75,44 +69,84 @@ export default class SocketIOServer {
   public broadcasterMount() {
     this.broadcasterNsp = this.io.of('/broadcaster');
     this.broadcasterNsp.use(async (socket, next) => {
-      const { id: broadcasterId, alias, userId, broadcasterToken } = socket.handshake.auth;
+      const uca = socket.handshake.headers['x-uca']?.toString() || socket.handshake.query.uca?.toString() || '';
+      const userId =
+        socket.handshake.headers['x-user-id']?.toString() || socket.handshake.query.userId?.toString() || '';
+      if (!uca || !userId) {
+        return next(getGuardErrorObject(new LogicException(ErrCode.IllegalParameters)));
+      }
+      const { id, broadcasterToken, directorToken } = socket.handshake.auth;
       try {
-        const contestMember = await this.liveContestService.findContestMemberById(alias, userId);
+        if ((broadcasterToken && directorToken) || (!broadcasterToken && !directorToken)) {
+          return next(getGuardErrorObject(new LogicException(ErrCode.IllegalParameters)));
+        }
+        const contestMember = await this.liveContestService.findContestMemberById(uca, userId);
         if (!contestMember) {
           return next(getGuardErrorObject(new LogicException(ErrCode.LiveContestMemberNotFound)));
         }
-        if (!broadcasterToken || broadcasterToken !== contestMember.broadcasterToken) {
+        if (broadcasterToken && broadcasterToken !== contestMember.broadcasterToken) {
           return next(getGuardErrorObject(new LogicException(ErrCode.InvalidAuthInfo)));
         }
+        // TODO use contest-specific token instead of global auth token
+        if (directorToken && directorToken !== process.env.AUTH_TOKEN) {
+          return next(getGuardErrorObject(new LogicException(ErrCode.InvalidAuthInfo)));
+        }
+
         next();
       } catch (e) {
-        console.error(
-          `[socket.authGuard] broadcaster guard failed for broadcaster: ${broadcasterId} (${alias}, ${userId})`,
-          e,
-        );
+        console.error(`[socket.authGuard] broadcaster guard failed: ${id} (${uca}, ${userId})`, e);
         next(getGuardErrorObject(e));
       }
     });
 
     this.broadcasterNsp.on('connection', (socket) => {
-      const { id: broadcasterId, alias, userId } = socket.handshake.auth;
-      console.log(`[socket.connection] [${alias}:${userId}] broadcaster:`, broadcasterId);
+      const uca = socket.handshake.headers['x-uca']?.toString() || socket.handshake.query.uca?.toString() || '';
+      const userId =
+        socket.handshake.headers['x-user-id']?.toString() || socket.handshake.query.userId?.toString() || '';
+      const { id } = socket.handshake.auth;
+      const role = socket.handshake.auth.broadcasterToken
+        ? 'broadcaster'
+        : socket.handshake.auth.directorToken
+        ? 'director'
+        : null;
+      console.log(`[socket.connection] [${uca}:${userId}]`, id, role);
+      if (role === 'broadcaster') {
+        // TODO 踢出其他 broadcaster
+      }
+      if (role === 'director') {
+        socket.join(this.getViewerRoomKey(uca, userId));
+      }
 
       socket.on('disconnect', async (reason) => {
-        console.log(`[socket.disconnect] [${alias}:${userId}] broadcaster:`, broadcasterId, reason);
+        console.log(`[socket.disconnect] [${uca}:${userId}]:`, id, role, reason);
         // 粗暴但有效的做法，一旦推流方断连就清空所有，下次需要重新走一套流程
-        await this.clearRoomAndAllData(alias, userId);
+        if (role === 'broadcaster') {
+          await this.clearRoomAndAllData(uca, userId);
+          this.broadcasterNsp.to(this.getViewerRoomKey(uca, userId)).emit('roomDestroyed');
+        }
+        if (role === 'director') {
+          const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
+          const peer = mediaRoom?.peers.get(id);
+          peer?.transport.close();
+          mediaRoom?.peers.delete(id);
+          mediaRoom?.viewers.delete(id);
+        }
       });
 
+      /**
+       * getContestInfo: 获取比赛信息
+       * @role broadcaster | director
+       */
       registerSocketEvent(socket, 'getContestInfo', async () => {
-        const contestInfo = await this.liveContestService.findContestByAlias(alias);
+        const contestInfo = await this.liveContestService.findContestByAlias(uca);
         if (!contestInfo) {
           throw new LogicException(ErrCode.LiveContestNotFound);
         }
-        const contestMember = await this.liveContestService.findContestMemberById(alias, userId);
+        const contestMember = await this.liveContestService.findContestMemberById(uca, userId);
         if (!contestMember) {
           throw new LogicException(ErrCode.LiveContestMemberNotFound);
         }
+
         return {
           alias: contestInfo.alias,
           contest: contestInfo.contest,
@@ -123,12 +157,17 @@ export default class SocketIOServer {
 
       /**
        * confirmReady: 确认准备就绪，服务端创建 media room 并创建 transport
+       * @role broadcaster
        */
       registerSocketEvent(socket, 'confirmReady', async (data: { tracks: BroadcasterStoreTracks }) => {
-        console.log(`[socket.confirmReady] [${alias}:${userId}:${broadcasterId}] data:`, data);
-        socket.join(this.getBroadcasterRoomKey(alias, userId));
+        if (role !== 'broadcaster') {
+          throw new LogicException(ErrCode.IllegalRequest);
+        }
 
-        await this.liveContestService.setBroadcasterStoreInfo(alias, userId, {
+        console.log(`[socket.confirmReady] [${uca}:${userId}:${id}] data:`, data);
+        socket.join(this.getBroadcasterRoomKey(uca, userId));
+
+        await this.liveContestService.setBroadcasterStoreInfo(uca, userId, {
           status: 'ready',
           tracks: data.tracks.map((track) => ({
             trackId: track.trackId,
@@ -136,7 +175,7 @@ export default class SocketIOServer {
           })),
           broadcastingTrackIds: [],
         });
-        await this.liveContestService.setBroadcasterStoreTracks(alias, userId, data.tracks);
+        await this.liveContestService.setBroadcasterStoreTracks(uca, userId, data.tracks);
 
         const transport = await this.mediasoupRouter.createWebRtcTransport({
           listenIps: [{ ip: '0.0.0.0', announcedIp: process.env.PUBLIC_IP || '127.0.0.1' }],
@@ -144,49 +183,54 @@ export default class SocketIOServer {
           enableTcp: true,
         });
         const room = this.createMediaRoom();
-        const roomKey = this.getMediaRoomKey(alias, userId);
+        const roomKey = this.getMediaRoomKey(uca, userId);
         const broadcasterPeer: MediaRoomPeer = {
           transport,
           trackProducers: new Map(),
         };
-        room.peers.set(broadcasterId, broadcasterPeer);
-        room.broadcaster = broadcasterPeer; // alias to peers[broadcasterId]
+        room.peers.set(id, broadcasterPeer);
+        room.broadcaster = broadcasterPeer; // alias to peers[id]
         this.mediaRooms.set(roomKey, room);
-        console.log(`[socket.confirmReady] [${alias}:${userId}:${broadcasterId}] created media room: ${roomKey}`);
-        console.log(`[socket.confirmReady] [${alias}:${userId}:${broadcasterId}] joined broadcaster: ${broadcasterId}`);
+        console.log(`[socket.confirmReady] [${uca}:${userId}:${id}] created media room: ${roomKey}`);
+        console.log(`[socket.confirmReady] [${uca}:${userId}:${id}] joined broadcaster: ${id}`);
 
-        // temp trigger requestStartBroadcast
-        // setTimeout(async () => {
-        //   console.log(
-        //     `[socket.confirmReady] [${alias}:${userId}] temp trigger requestStartBroadcast:`,
-        //     tracks.map((track: any) => track.trackId),
-        //   );
-        //   socket.emit('requestStartBroadcast', {
-        //     trackIds: tracks.map((track: any) => track.trackId),
-        //     transport: {
-        //       id: transport.id,
-        //       iceParameters: transport.iceParameters,
-        //       iceCandidates: transport.iceCandidates,
-        //       dtlsParameters: transport.dtlsParameters,
-        //     },
-        //     routerRtpCapabilities: this.mediasoupRouter.rtpCapabilities,
-        //   });
-        // }, 2000);
+        return {
+          transport: {
+            id: broadcasterPeer.transport.id,
+            iceParameters: broadcasterPeer.transport.iceParameters,
+            iceCandidates: broadcasterPeer.transport.iceCandidates,
+            dtlsParameters: broadcasterPeer.transport.dtlsParameters,
+          },
+          routerRtpCapabilities: this.mediasoupRouter.rtpCapabilities,
+        };
       });
 
+      /**
+       * cancelReady: 取消准备就绪
+       * @role broadcaster
+       */
       registerSocketEvent(socket, 'cancelReady', async () => {
-        console.log(`[socket.cancelReady] [${alias}:${userId}:${broadcasterId}]`);
-        socket.leave(this.getBroadcasterRoomKey(alias, userId));
-        await this.clearRoomAndAllData(alias, userId);
+        if (role !== 'broadcaster') {
+          throw new LogicException(ErrCode.IllegalRequest);
+        }
+
+        console.log(`[socket.cancelReady] [${uca}:${userId}:${id}]`);
+        socket.leave(this.getBroadcasterRoomKey(uca, userId));
+        await this.clearRoomAndAllData(uca, userId);
+        this.broadcasterNsp.to(this.getViewerRoomKey(uca, userId)).emit('roomDestroyed');
       });
 
+      /**
+       * completeConnectTransport: 完成连接 transport
+       * @role broadcaster | director
+       */
       registerSocketEvent(socket, 'completeConnectTransport', async (data: { dtlsParameters: DtlsParameters }) => {
-        console.log(`[socket.completeConnectTransport] [${alias}:${userId}:${broadcasterId}] data:`, data);
-        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
+        console.log(`[socket.completeConnectTransport] [${uca}:${userId}:${id}:${role}] data:`, data);
+        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
         if (!mediaRoom) {
           throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
         }
-        const peer = mediaRoom.peers.get(broadcasterId);
+        const peer = mediaRoom.peers.get(id);
         if (!peer) {
           throw new LogicException(ErrCode.BroadcastMediaRoomPeerMissing);
         }
@@ -194,21 +238,29 @@ export default class SocketIOServer {
           dtlsParameters: data.dtlsParameters,
         });
         console.log(
-          `[socket.completeConnectTransport] [${alias}:${userId}:${broadcasterId}] connected to transport:`,
+          `[socket.completeConnectTransport] [${uca}:${userId}:${id}:${role}] connected to transport:`,
           peer.transport.id,
         );
       });
 
+      /**
+       * produce: 频流
+       * @role broadcaster
+       */
       registerSocketEvent(
         socket,
         'produce',
         async (data: { trackId: string; kind: MediaKind; rtpParameters: RtpParameters }) => {
-          console.log(`[socket.produce] [${alias}:${userId}:${broadcasterId}] data:`, data);
-          const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
+          if (role !== 'broadcaster') {
+            throw new LogicException(ErrCode.IllegalRequest);
+          }
+
+          console.log(`[socket.produce] [${uca}:${userId}:${id}] data:`, data);
+          const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
           if (!mediaRoom) {
             throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
           }
-          const peer = mediaRoom.peers.get(broadcasterId);
+          const peer = mediaRoom.peers.get(id);
           if (!peer) {
             throw new LogicException(ErrCode.BroadcastMediaRoomPeerMissing);
           }
@@ -216,20 +268,23 @@ export default class SocketIOServer {
             kind: data.kind,
             rtpParameters: data.rtpParameters,
             appData: {
-              broadcasterId,
-              alias,
+              id,
+              uca,
               userId,
               trackId: data.trackId,
             },
           });
-          console.log(`[socket.produce] [${alias}:${userId}:${broadcasterId}] produced track:`, producer.id);
+          console.log(`[socket.produce] [${uca}:${userId}:${id}] produced track:`, producer.id);
           peer.trackProducers?.set(data.trackId, producer);
-          const info = await this.liveContestService.getBroadcasterStoreInfo(alias, userId);
+          const info = await this.liveContestService.getBroadcasterStoreInfo(uca, userId);
           if (info) {
             info.status = 'broadcasting';
-            info.broadcastingTrackIds.push(data.trackId);
-            await this.liveContestService.setBroadcasterStoreInfo(alias, userId, info);
+            if (!info.broadcastingTrackIds.includes(data.trackId)) {
+              info.broadcastingTrackIds.push(data.trackId);
+            }
+            await this.liveContestService.setBroadcasterStoreInfo(uca, userId, info);
           }
+
           return {
             producerId: producer.id,
             type: producer.type,
@@ -237,83 +292,17 @@ export default class SocketIOServer {
           };
         },
       );
-    });
-  }
-
-  public viewerMount() {
-    this.viewerNsp = this.io.of('/viewer');
-    this.viewerNsp.use(async (socket, next) => {
-      const { id: viewerId, alias, userId, token } = socket.handshake.auth;
-      try {
-        // TODO use contest token instead of global auth token
-        if (!token || token !== process.env.AUTH_TOKEN) {
-          return next(getGuardErrorObject(new LogicException(ErrCode.InvalidAuthInfo)));
-        }
-        next();
-      } catch (e) {
-        console.error(`[socket.authGuard] viewer guard failed for viewer: ${viewerId} (${alias}, ${userId})`, e);
-        next(getGuardErrorObject(e));
-      }
-    });
-
-    this.viewerNsp.on('connection', async (socket) => {
-      const { id: viewerId, alias, userId } = socket.handshake.auth;
-      console.log(`[socket.connection] [${alias}:${userId}] viewer:`, viewerId);
-      socket.join(this.getViewerRoomKey(alias, userId));
 
       /**
-       * 断连后此 viewer 相关 peer 信息和 transport 都会被清理，需要重新 joinBroadcastRoom
+       * joinBroadcastRoom: 加入推流房间
+       * @role director
        */
-      socket.on('disconnect', () => {
-        console.log(`[socket.disconnect] [${alias}:${userId}] viewer:`, viewerId);
-        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
-        const peer = mediaRoom?.peers.get(viewerId);
-        peer?.transport.close();
-        mediaRoom?.peers.delete(viewerId);
-        mediaRoom?.viewers.delete(viewerId);
-      });
-
-      registerSocketEvent(socket, 'startBroadcast', async (data: { trackIds: string[] }) => {
-        const info = await this.liveContestService.getBroadcasterStoreInfo(alias, userId);
-        if (!info || !['ready', 'broadcasting'].includes(info.status)) {
-          throw new LogicException(ErrCode.BroadcastNotReady);
-        }
-        const tracks = await this.liveContestService.getBroadcasterStoreTracks(alias, userId);
-        if (!tracks || tracks.length === 0) {
-          throw new LogicException(ErrCode.BroadcastNotReady);
-        }
-        // 找到 room 里的 broadcaster，并由服务端向 broadcaster 请求开始推流
-        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
-        if (!mediaRoom) {
-          throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
-        }
-        const broadcasterPeer = mediaRoom.broadcaster;
-        if (!broadcasterPeer) {
-          throw new LogicException(ErrCode.BroadcastMediaRoomPeerMissing);
-        }
-        const availableTracks = data.trackIds.filter((trackId) => {
-          return tracks.some((track: any) => track.trackId === trackId);
-        });
-        console.log(`[socket.startBroadcast] [${alias}:${userId}:${viewerId}] checking available tracks:`, availableTracks);
-        if (availableTracks.length > 0) {
-          console.log(
-            `[socket.emit.requestStartBroadcast] [${alias}:${userId}:${viewerId}] requesting start broadcast to broadcaster`,
-          );
-          this.broadcasterNsp.to(this.getBroadcasterRoomKey(alias, userId)).emit('requestStartBroadcast', {
-            trackIds: availableTracks,
-            transport: {
-              id: broadcasterPeer.transport.id,
-              iceParameters: broadcasterPeer.transport.iceParameters,
-              iceCandidates: broadcasterPeer.transport.iceCandidates,
-              dtlsParameters: broadcasterPeer.transport.dtlsParameters,
-            },
-            routerRtpCapabilities: this.mediasoupRouter.rtpCapabilities,
-          });
-        }
-      });
-
       registerSocketEvent(socket, 'joinBroadcastRoom', async () => {
-        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
+        if (role !== 'director') {
+          throw new LogicException(ErrCode.IllegalRequest);
+        }
+
+        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
         if (!mediaRoom) {
           throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
         }
@@ -325,9 +314,10 @@ export default class SocketIOServer {
         const viewerPeer: MediaRoomPeer = {
           transport,
         };
-        mediaRoom.peers.set(viewerId, viewerPeer);
-        mediaRoom.viewers.set(viewerId, viewerPeer); // alias to peers[viewerId]
-        console.log(`[socket.joinBroadcastRoom] [${alias}:${userId}:${viewerId}] joined viewer:`, viewerId);
+        mediaRoom.peers.set(id, viewerPeer);
+        mediaRoom.viewers.set(id, viewerPeer); // alias to peers[id]
+        console.log(`[socket.joinBroadcastRoom] [${uca}:${userId}:${id}] joined viewer:`, id);
+
         return {
           transport: {
             id: transport.id,
@@ -339,25 +329,51 @@ export default class SocketIOServer {
         };
       });
 
-      registerSocketEvent(socket, 'completeConnectTransport', async (data: { dtlsParameters: DtlsParameters }) => {
-        console.log(`[socket.completeConnectTransport] [${alias}:${userId}:${viewerId}] data:`, data);
-        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
+      /**
+       * startBroadcast: 请求开始推流
+       * @role director
+       */
+      registerSocketEvent(socket, 'startBroadcast', async (data: { trackIds: string[] }) => {
+        if (role !== 'director') {
+          throw new LogicException(ErrCode.IllegalRequest);
+        }
+
+        console.log(`[socket.startBroadcast] [${uca}:${userId}:${id}] data:`, data);
+        const info = await this.liveContestService.getBroadcasterStoreInfo(uca, userId);
+        if (!info || !['ready', 'broadcasting'].includes(info.status)) {
+          throw new LogicException(ErrCode.BroadcastNotReady);
+        }
+        const tracks = await this.liveContestService.getBroadcasterStoreTracks(uca, userId);
+        if (!tracks || tracks.length === 0) {
+          throw new LogicException(ErrCode.BroadcastNotReady);
+        }
+        // 找到 room 里的 broadcaster，并由服务端向 broadcaster 请求开始推流
+        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
         if (!mediaRoom) {
           throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
         }
-        const peer = mediaRoom.peers.get(viewerId);
-        if (!peer) {
+        const broadcasterPeer = mediaRoom.broadcaster;
+        if (!broadcasterPeer) {
           throw new LogicException(ErrCode.BroadcastMediaRoomPeerMissing);
         }
-        await peer.transport.connect({
-          dtlsParameters: data.dtlsParameters,
+        const availableTracks = data.trackIds.filter((trackId) => {
+          return tracks.some((track: any) => track.trackId === trackId);
         });
-        console.log(
-          `[socket.completeConnectTransport] [${alias}:${userId}:${viewerId}] connected to transport:`,
-          peer.transport.id,
-        );
+        console.log(`[socket.startBroadcast] [${uca}:${userId}:${id}] checking available tracks:`, availableTracks);
+        if (availableTracks.length > 0) {
+          console.log(
+            `[socket.emit.requestStartBroadcast] [${uca}:${userId}:${id}] requesting start broadcast to broadcaster`,
+          );
+          this.broadcasterNsp.to(this.getBroadcasterRoomKey(uca, userId)).emit('requestStartBroadcast', {
+            trackIds: availableTracks,
+          });
+        }
       });
 
+      /**
+       * consume: 消费流
+       * @role director
+       */
       registerSocketEvent(
         socket,
         'consume',
@@ -367,12 +383,16 @@ export default class SocketIOServer {
           paused?: boolean;
           preferredLayers?: ConsumerLayers;
         }) => {
-          console.log(`[socket.consume] [${alias}:${userId}:${viewerId}] data:`, data);
-          const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
+          if (role !== 'director') {
+            throw new LogicException(ErrCode.IllegalRequest);
+          }
+
+          console.log(`[socket.consume] [${uca}:${userId}:${id}] data:`, data);
+          const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
           if (!mediaRoom) {
             throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
           }
-          const peer = mediaRoom.peers.get(viewerId);
+          const peer = mediaRoom.peers.get(id);
           if (!peer) {
             throw new LogicException(ErrCode.BroadcastMediaRoomPeerMissing);
           }
@@ -397,13 +417,14 @@ export default class SocketIOServer {
             paused: data.paused,
             preferredLayers: data.preferredLayers,
             appData: {
-              viewerId,
-              alias,
+              id,
+              uca,
               userId,
               trackId: data.trackId,
             },
           });
-          console.log(`[socket.consume] [${alias}:${userId}:${viewerId}] consumed track:`, consumer.id);
+          console.log(`[socket.consume] [${uca}:${userId}:${id}] consumed track:`, consumer.id);
+
           return {
             consumerId: consumer.id,
             producerId: producer.id,
@@ -416,43 +437,63 @@ export default class SocketIOServer {
         },
       );
 
-      registerSocketEvent(socket, 'stopBroadcast', async () => {
-        console.log(`[socket.stopBroadcast] [${alias}:${userId}:${viewerId}]`);
-        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
+      /**
+       * stopBroadcast: 请求停止推流
+       * @role director
+       */
+      registerSocketEvent(socket, 'stopBroadcast', async (data: { trackIds: string[] }) => {
+        if (role !== 'director') {
+          throw new LogicException(ErrCode.IllegalRequest);
+        }
+
+        console.log(`[socket.stopBroadcast] [${uca}:${userId}:${id}] data:`, data);
+        const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
         if (!mediaRoom) {
           throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
         }
-        this.broadcasterNsp.to(this.getBroadcasterRoomKey(alias, userId)).emit('requestStopBroadcast', async () => {
-          console.log(
-            `[socket.emit.requestStopBroadcast] [${alias}:${userId}:${viewerId}] received broadcaster ack, cleaning up producers`,
-          );
-          // 仅清理 producers 相关，不关闭 transport
-          const info = await this.liveContestService.getBroadcasterStoreInfo(alias, userId);
-          if (info) {
-            info.status = 'ready';
-            info.broadcastingTrackIds = [];
-            await this.liveContestService.setBroadcasterStoreInfo(alias, userId, info);
-          }
-          mediaRoom.broadcaster?.trackProducers?.forEach((producer) => {
-            producer.close();
-          });
-          mediaRoom.broadcaster?.trackProducers?.clear();
-          this.viewerNsp.to(this.getViewerRoomKey(alias, userId)).emit('broadcastStopped');
-        });
+        this.broadcasterNsp.to(this.getBroadcasterRoomKey(uca, userId)).emit(
+          'requestStopBroadcast',
+          {
+            trackIds: data.trackIds,
+          },
+          async () => {
+            console.log(
+              `[socket.emit.requestStopBroadcast] [${uca}:${userId}:${id}] received broadcaster ack, cleaning up producers:`,
+              data.trackIds,
+            );
+            // 仅清理 producers 相关，不关闭 transport
+            const info = await this.liveContestService.getBroadcasterStoreInfo(uca, userId);
+            if (info) {
+              const nextBroadcastingTrackIds = info.broadcastingTrackIds.filter(
+                (trackId) => !data.trackIds.includes(trackId),
+              );
+              info.status = nextBroadcastingTrackIds.length > 0 ? 'broadcasting' : 'ready';
+              info.broadcastingTrackIds = nextBroadcastingTrackIds;
+              await this.liveContestService.setBroadcasterStoreInfo(uca, userId, info);
+            }
+            mediaRoom.broadcaster?.trackProducers?.forEach((producer, trackId) => {
+              if (data.trackIds.includes(trackId)) {
+                producer.close();
+                mediaRoom.broadcaster?.trackProducers?.delete(trackId);
+              }
+            });
+            // this.viewerNsp.to(this.getViewerRoomKey(uca, userId)).emit('broadcastStopped');
+          },
+        );
       });
     });
   }
 
-  private getBroadcasterRoomKey(alias: string, userId: string) {
-    return `broadcaster:${alias}:${userId}`;
+  private getBroadcasterRoomKey(uca: string, userId: string) {
+    return `broadcaster:${uca}:${userId}`;
   }
 
-  private getViewerRoomKey(alias: string, userId: string) {
-    return `viewer:${alias}:${userId}`;
+  private getViewerRoomKey(uca: string, userId: string) {
+    return `viewer:${uca}:${userId}`;
   }
 
-  private getMediaRoomKey(alias: string, userId: string, trackId?: string) {
-    return trackId ? `${alias}:${userId}:${trackId}` : `${alias}:${userId}`;
+  private getMediaRoomKey(uca: string, userId: string, trackId?: string) {
+    return trackId ? `${uca}:${userId}:${trackId}` : `${uca}:${userId}`;
   }
 
   private createMediaRoom() {
@@ -464,13 +505,13 @@ export default class SocketIOServer {
     return room;
   }
 
-  private async clearRoomAndAllData(alias: string, userId: string) {
+  private async clearRoomAndAllData(uca: string, userId: string) {
     await Promise.all([
-      this.liveContestService.delBroadcasterStoreInfo(alias, userId),
-      this.liveContestService.delBroadcasterStoreTracks(alias, userId),
+      this.liveContestService.delBroadcasterStoreInfo(uca, userId),
+      this.liveContestService.delBroadcasterStoreTracks(uca, userId),
     ]);
 
-    const room = this.mediaRooms.get(this.getMediaRoomKey(alias, userId));
+    const room = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
     if (room) {
       room.broadcaster?.trackProducers?.forEach((producer) => {
         producer.close();
@@ -479,7 +520,7 @@ export default class SocketIOServer {
         peer.transport.close();
       });
       room.peers.clear();
-      this.mediaRooms.delete(this.getMediaRoomKey(alias, userId));
+      this.mediaRooms.delete(this.getMediaRoomKey(uca, userId));
     }
   }
 }

@@ -24,7 +24,7 @@ export default class LiveContestController {
   public async getContestAllBroadcasterInfo(
     @Data() data: GetContestAllBroadcasterInfoReqDTO,
   ): Promise<GetContestAllBroadcasterInfoRespDTO> {
-    const res = await this.service.getAllBroadcasterStoreInfo(data.alias);
+    const res = await this.service.getAllBroadcasterStoreInfo(data.uca);
     return {
       broadcasters: res,
     };
