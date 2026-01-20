@@ -73,11 +73,13 @@ export default class SocketIOServer {
       const userId =
         socket.handshake.headers['x-user-id']?.toString() || socket.handshake.query.userId?.toString() || '';
       if (!uca || !userId) {
+        console.log('[socket] [/broadcaster] [authGuard] all fields are missing');
         return next(getGuardErrorObject(new LogicException(ErrCode.IllegalParameters)));
       }
       const { id, broadcasterToken, directorToken } = socket.handshake.auth;
       try {
         if ((broadcasterToken && directorToken) || (!broadcasterToken && !directorToken)) {
+          console.log('[socket] [/broadcaster] [authGuard] conflict token or missing token');
           return next(getGuardErrorObject(new LogicException(ErrCode.IllegalParameters)));
         }
         const contestMember = await this.liveContestService.findContestMemberById(uca, userId);
@@ -85,16 +87,18 @@ export default class SocketIOServer {
           return next(getGuardErrorObject(new LogicException(ErrCode.LiveContestMemberNotFound)));
         }
         if (broadcasterToken && broadcasterToken !== contestMember.broadcasterToken) {
+          console.log('[socket] [/broadcaster] [authGuard] invalid broadcaster token');
           return next(getGuardErrorObject(new LogicException(ErrCode.InvalidAuthInfo)));
         }
         // TODO use contest-specific token instead of global auth token
         if (directorToken && directorToken !== process.env.AUTH_TOKEN) {
+          console.log('[socket] [/broadcaster] [authGuard] invalid director token');
           return next(getGuardErrorObject(new LogicException(ErrCode.InvalidAuthInfo)));
         }
 
         next();
       } catch (e) {
-        console.error(`[socket.authGuard] broadcaster guard failed: ${id} (${uca}, ${userId})`, e);
+        console.error(`[socket] [/broadcaster] [authGuard] guard failed: ${id} (${uca}, ${userId})`, e);
         next(getGuardErrorObject(e));
       }
     });
@@ -109,7 +113,7 @@ export default class SocketIOServer {
         : socket.handshake.auth.directorToken
         ? 'director'
         : null;
-      console.log(`[socket.connection] [${uca}:${userId}]`, id, role);
+      console.log(`[socket] [/broadcaster] [connection] [${uca}:${userId}]`, id, role);
       if (role === 'broadcaster') {
         // TODO 踢出其他 broadcaster
       }
@@ -118,7 +122,7 @@ export default class SocketIOServer {
       }
 
       socket.on('disconnect', async (reason) => {
-        console.log(`[socket.disconnect] [${uca}:${userId}]:`, id, role, reason);
+        console.log(`[socket] [/broadcaster] [disconnect] [${uca}:${userId}]:`, id, role, reason);
         // 粗暴但有效的做法，一旦推流方断连就清空所有，下次需要重新走一套流程
         if (role === 'broadcaster') {
           await this.clearRoomAndAllData(uca, userId);
@@ -164,7 +168,7 @@ export default class SocketIOServer {
           throw new LogicException(ErrCode.IllegalRequest);
         }
 
-        console.log(`[socket.confirmReady] [${uca}:${userId}:${id}] data:`, data);
+        console.log(`[socket] [/broadcaster] [confirmReady] [${uca}:${userId}:${id}] data:`, data);
         socket.join(this.getBroadcasterRoomKey(uca, userId));
 
         await this.liveContestService.setBroadcasterStoreInfo(uca, userId, {
@@ -191,8 +195,8 @@ export default class SocketIOServer {
         room.peers.set(id, broadcasterPeer);
         room.broadcaster = broadcasterPeer; // alias to peers[id]
         this.mediaRooms.set(roomKey, room);
-        console.log(`[socket.confirmReady] [${uca}:${userId}:${id}] created media room: ${roomKey}`);
-        console.log(`[socket.confirmReady] [${uca}:${userId}:${id}] joined broadcaster: ${id}`);
+        console.log(`[socket] [/broadcaster] [confirmReady] [${uca}:${userId}:${id}] created media room: ${roomKey}`);
+        console.log(`[socket] [/broadcaster] [confirmReady] [${uca}:${userId}:${id}] joined broadcaster: ${id}`);
 
         return {
           transport: {
@@ -214,7 +218,7 @@ export default class SocketIOServer {
           throw new LogicException(ErrCode.IllegalRequest);
         }
 
-        console.log(`[socket.cancelReady] [${uca}:${userId}:${id}]`);
+        console.log(`[socket] [/broadcaster] [cancelReady] [${uca}:${userId}:${id}]`);
         socket.leave(this.getBroadcasterRoomKey(uca, userId));
         await this.clearRoomAndAllData(uca, userId);
         this.broadcasterNsp.to(this.getViewerRoomKey(uca, userId)).emit('roomDestroyed');
@@ -225,7 +229,7 @@ export default class SocketIOServer {
        * @role broadcaster | director
        */
       registerSocketEvent(socket, 'completeConnectTransport', async (data: { dtlsParameters: DtlsParameters }) => {
-        console.log(`[socket.completeConnectTransport] [${uca}:${userId}:${id}:${role}] data:`, data);
+        console.log(`[socket] [/broadcaster] [completeConnectTransport] [${uca}:${userId}:${id}:${role}] data:`, data);
         const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
         if (!mediaRoom) {
           throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
@@ -238,13 +242,13 @@ export default class SocketIOServer {
           dtlsParameters: data.dtlsParameters,
         });
         console.log(
-          `[socket.completeConnectTransport] [${uca}:${userId}:${id}:${role}] connected to transport:`,
+          `[socket] [/broadcaster] [completeConnectTransport] [${uca}:${userId}:${id}:${role}] connected to transport:`,
           peer.transport.id,
         );
       });
 
       /**
-       * produce: 频流
+       * produce: 推流
        * @role broadcaster
        */
       registerSocketEvent(
@@ -255,7 +259,7 @@ export default class SocketIOServer {
             throw new LogicException(ErrCode.IllegalRequest);
           }
 
-          console.log(`[socket.produce] [${uca}:${userId}:${id}] data:`, data);
+          console.log(`[socket] [/broadcaster] [produce] [${uca}:${userId}:${id}] data:`, data);
           const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
           if (!mediaRoom) {
             throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
@@ -274,7 +278,7 @@ export default class SocketIOServer {
               trackId: data.trackId,
             },
           });
-          console.log(`[socket.produce] [${uca}:${userId}:${id}] produced track:`, producer.id);
+          console.log(`[socket] [/broadcaster] [produce] [${uca}:${userId}:${id}] produced track:`, producer.id);
           peer.trackProducers?.set(data.trackId, producer);
           const info = await this.liveContestService.getBroadcasterStoreInfo(uca, userId);
           if (info) {
@@ -316,7 +320,7 @@ export default class SocketIOServer {
         };
         mediaRoom.peers.set(id, viewerPeer);
         mediaRoom.viewers.set(id, viewerPeer); // alias to peers[id]
-        console.log(`[socket.joinBroadcastRoom] [${uca}:${userId}:${id}] joined viewer:`, id);
+        console.log(`[socket] [/broadcaster] [joinBroadcastRoom] [${uca}:${userId}:${id}] joined viewer:`, id);
 
         return {
           transport: {
@@ -338,7 +342,7 @@ export default class SocketIOServer {
           throw new LogicException(ErrCode.IllegalRequest);
         }
 
-        console.log(`[socket.startBroadcast] [${uca}:${userId}:${id}] data:`, data);
+        console.log(`[socket] [/broadcaster] [startBroadcast] [${uca}:${userId}:${id}] data:`, data);
         const info = await this.liveContestService.getBroadcasterStoreInfo(uca, userId);
         if (!info || !['ready', 'broadcasting'].includes(info.status)) {
           throw new LogicException(ErrCode.BroadcastNotReady);
@@ -359,10 +363,10 @@ export default class SocketIOServer {
         const availableTracks = data.trackIds.filter((trackId) => {
           return tracks.some((track: any) => track.trackId === trackId);
         });
-        console.log(`[socket.startBroadcast] [${uca}:${userId}:${id}] checking available tracks:`, availableTracks);
+        console.log(`[socket] [/broadcaster] [startBroadcast] [${uca}:${userId}:${id}] checking available tracks:`, availableTracks);
         if (availableTracks.length > 0) {
           console.log(
-            `[socket.emit.requestStartBroadcast] [${uca}:${userId}:${id}] requesting start broadcast to broadcaster`,
+            `[socket] [/broadcaster] [emit.requestStartBroadcast] [${uca}:${userId}:${id}] requesting start broadcast to broadcaster`,
           );
           this.broadcasterNsp.to(this.getBroadcasterRoomKey(uca, userId)).emit('requestStartBroadcast', {
             trackIds: availableTracks,
@@ -387,7 +391,7 @@ export default class SocketIOServer {
             throw new LogicException(ErrCode.IllegalRequest);
           }
 
-          console.log(`[socket.consume] [${uca}:${userId}:${id}] data:`, data);
+          console.log(`[socket] [/broadcaster] [consume] [${uca}:${userId}:${id}] data:`, data);
           const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
           if (!mediaRoom) {
             throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
@@ -423,7 +427,7 @@ export default class SocketIOServer {
               trackId: data.trackId,
             },
           });
-          console.log(`[socket.consume] [${uca}:${userId}:${id}] consumed track:`, consumer.id);
+          console.log(`[socket] [/broadcaster] [consume] [${uca}:${userId}:${id}] consumed track:`, consumer.id);
 
           return {
             consumerId: consumer.id,
@@ -446,7 +450,7 @@ export default class SocketIOServer {
           throw new LogicException(ErrCode.IllegalRequest);
         }
 
-        console.log(`[socket.stopBroadcast] [${uca}:${userId}:${id}] data:`, data);
+        console.log(`[socket] [/broadcaster] [stopBroadcast] [${uca}:${userId}:${id}] data:`, data);
         const mediaRoom = this.mediaRooms.get(this.getMediaRoomKey(uca, userId));
         if (!mediaRoom) {
           throw new LogicException(ErrCode.BroadcastMediaRoomBroken);
@@ -458,7 +462,7 @@ export default class SocketIOServer {
           },
           async () => {
             console.log(
-              `[socket.emit.requestStopBroadcast] [${uca}:${userId}:${id}] received broadcaster ack, cleaning up producers:`,
+              `[socket] [/broadcaster] [emit.requestStopBroadcast] [${uca}:${userId}:${id}] received broadcaster ack, cleaning up producers:`,
               data.trackIds,
             );
             // 仅清理 producers 相关，不关闭 transport
@@ -559,7 +563,7 @@ function wrapSocketHandler(event: string, handler: (data: any) => Promise<any> |
         data: result,
       });
     } catch (err) {
-      console.error(`[socket.${event}] error:`, err);
+      console.error(`[socket] [${event}] error:`, err);
       callback(handleError(err));
     }
   };
