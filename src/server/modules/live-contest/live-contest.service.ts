@@ -25,15 +25,6 @@ export type LiveContestMember = User & {
   broadcasterToken?: string;
 };
 
-export interface BroadcasterStoreInfo {
-  status: 'ready' | 'broadcasting';
-  tracks: {
-    trackId: string;
-    type: 'screen' | 'camera' | 'microphone';
-  }[];
-  broadcastingTrackIds: string[];
-}
-
 export interface BroadcasterStoreTrackItem {
   trackId: string;
   type: 'screen' | 'camera' | 'microphone';
@@ -42,11 +33,34 @@ export interface BroadcasterStoreTrackItem {
 
 export type BroadcasterStoreTracks = BroadcasterStoreTrackItem[];
 
+export interface BroadcasterStoreInfo {
+  status: 'ready' | 'broadcasting';
+  tracks: Pick<BroadcasterStoreTrackItem, 'trackId' | 'type'>[];
+  broadcastingTrackIds: string[];
+}
+
+export interface ShotStoreTrackItem {
+  trackId: string;
+  name: string;
+  type: 'video' | 'audio';
+  // other fields...
+}
+
+export type ShotStoreTracks = ShotStoreTrackItem[];
+
+export interface ShotStoreInfo {
+  shotName: string;
+  status: 'ready' | 'broadcasting';
+  tracks: ShotStoreTrackItem[];
+  broadcastingTrackIds: string[];
+}
+
 @Provide()
 export default class LiveContestService {
   private readonly redis: Redis;
   private readonly apiClient: AxiosInstance;
   private readonly baseUrl: string;
+  private shotStoreMap: Map</** uca */ string, Map</** shotId */ string, ShotStoreInfo>> = new Map();
 
   public constructor(@Inject() private readonly redisClient: RedisClient) {
     this.redis = this.redisClient.getClient();
@@ -215,5 +229,26 @@ export default class LiveContestService {
     } catch (e) {
       return null;
     }
+  }
+
+  public getShotStore(uca: string): Map</** shotId */ string, ShotStoreInfo> | undefined {
+    if (!this.shotStoreMap.has(uca)) {
+      return undefined;
+    }
+    return this.shotStoreMap.get(uca)!;
+  }
+
+  public setShotStore(uca: string, shotId: string, info: ShotStoreInfo): void {
+    if (!this.shotStoreMap.has(uca)) {
+      this.shotStoreMap.set(uca, new Map());
+    }
+    this.shotStoreMap.get(uca)!.set(shotId, info);
+  }
+
+  public delShotStore(uca: string, shotId: string): void {
+    if (!this.shotStoreMap.has(uca)) {
+      return;
+    }
+    this.shotStoreMap.get(uca)!.delete(shotId);
   }
 }
