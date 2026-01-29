@@ -613,6 +613,7 @@ export default class SocketIOServer {
         socket.join(this.getShotLogicRoomKey(uca, id));
 
         this.liveContestService.setShotStore(uca, id, {
+          shotId: id,
           shotName: data.shotName,
           status: 'ready',
           tracks: data.tracks,
@@ -631,7 +632,7 @@ export default class SocketIOServer {
         mediaRoom.peers.set(id, shotPeer);
         mediaRoom.shots.set(id, shotPeer);
 
-        console.log(`[socket] [/shot] [confirmReady] [${uca}:${id}] joined shot: ${id}`);
+        console.log(`[socket] [/shot] [confirmReady] [${uca}:${id}] joined shot: ${data.shotName}`);
 
         return {
           transport: {
@@ -952,6 +953,7 @@ export default class SocketIOServer {
         room.peers.delete(id);
       }
     }
+    this.liveContestService.delShotStore(uca, id);
   }
 }
 

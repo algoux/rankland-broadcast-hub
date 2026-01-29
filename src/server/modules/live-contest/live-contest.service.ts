@@ -49,6 +49,7 @@ export interface ShotStoreTrackItem {
 export type ShotStoreTracks = ShotStoreTrackItem[];
 
 export interface ShotStoreInfo {
+  shotId: string;
   shotName: string;
   status: 'ready' | 'broadcasting';
   tracks: ShotStoreTrackItem[];
@@ -250,5 +251,17 @@ export default class LiveContestService {
       return;
     }
     this.shotStoreMap.get(uca)!.delete(shotId);
+  }
+
+  public getAllShotStoreInfo(uca: string): Record<string, ShotStoreInfo> {
+    if (!this.shotStoreMap.has(uca)) {
+      return {};
+    }
+    const res = this.shotStoreMap.get(uca)!;
+    const obj: Record<string, ShotStoreInfo> = {};
+    res.forEach((value, key) => {
+      obj[key] = value;
+    });
+    return obj;
   }
 }

@@ -5,6 +5,8 @@ import AuthGuard from '@server/guards/auth.guard';
 import {
   GetContestAllBroadcasterInfoReqDTO,
   GetContestAllBroadcasterInfoRespDTO,
+  GetContestAllShotInfoReqDTO,
+  GetContestAllShotInfoRespDTO,
 } from '@common/modules/live-contest/live-contest.dto';
 import LiveContestService from './live-contest.service';
 
@@ -27,6 +29,18 @@ export default class LiveContestController {
     const res = await this.service.getAllBroadcasterStoreInfo(data.uca);
     return {
       broadcasters: res,
+    };
+  }
+
+  @Get()
+  @UseGuards(AuthGuard)
+  @Contract(GetContestAllShotInfoReqDTO, GetContestAllShotInfoRespDTO)
+  public async getContestAllShotInfo(
+    @Data() data: GetContestAllShotInfoReqDTO,
+  ): Promise<GetContestAllShotInfoRespDTO> {
+    const res = await this.service.getAllShotStoreInfo(data.uca);
+    return {
+      shots: res,
     };
   }
 }
