@@ -896,7 +896,7 @@ export default class SocketIOServer {
                 mediaRoom.shots.get(data.shotId)?.trackProducers?.delete(trackId);
               }
             });
-            // this.viewerNsp.to(this.getViewerLogicRoomKey(uca)).emit('shotGone', { shotId: data.shotId });
+            this.shotNsp.to(this.getViewerLogicRoomKey(uca)).emit('broadcastStopped', { shotId: data.shotId, trackIds: data.trackIds });
           },
         );
       });
