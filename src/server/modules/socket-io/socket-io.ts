@@ -719,6 +719,10 @@ export default class SocketIOServer {
             }
           }
 
+          this.shotNsp
+            .to(this.getViewerLogicRoomKey(uca))
+            .emit('broadcastProduced', { shotId: id, trackId: data.trackId });
+
           return {
             producerId: producer.id,
             type: producer.type,
@@ -896,7 +900,9 @@ export default class SocketIOServer {
                 mediaRoom.shots.get(data.shotId)?.trackProducers?.delete(trackId);
               }
             });
-            this.shotNsp.to(this.getViewerLogicRoomKey(uca)).emit('broadcastStopped', { shotId: data.shotId, trackIds: data.trackIds });
+            this.shotNsp
+              .to(this.getViewerLogicRoomKey(uca))
+              .emit('broadcastStopped', { shotId: data.shotId, trackIds: data.trackIds });
           },
         );
       });
