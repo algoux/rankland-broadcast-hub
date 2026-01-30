@@ -604,46 +604,50 @@ export default class SocketIOServer {
        * confirmReady: 确认准备就绪，服务端创建 media room 并创建 transport
        * @role shot
        */
-      registerSocketEvent(socket, 'confirmReady', async (data: { shotId: string; shotName: string; tracks: ShotStoreTracks }) => {
-        if (role !== 'shot') {
-          throw new LogicException(ErrCode.IllegalRequest);
-        }
+      registerSocketEvent(
+        socket,
+        'confirmReady',
+        async (data: { shotId: string; shotName: string; tracks: ShotStoreTracks }) => {
+          if (role !== 'shot') {
+            throw new LogicException(ErrCode.IllegalRequest);
+          }
 
-        console.log(`[socket] [/shot] [confirmReady] [${uca}:${id}] data:`, data);
-        socket.join(this.getShotLogicRoomKey(uca, id));
+          console.log(`[socket] [/shot] [confirmReady] [${uca}:${id}] data:`, data);
+          socket.join(this.getShotLogicRoomKey(uca, id));
 
-        this.liveContestService.setShotStore(uca, id, {
-          shotId: id,
-          shotName: data.shotName,
-          status: 'ready',
-          tracks: data.tracks,
-          broadcastingTrackIds: [],
-        });
+          this.liveContestService.setShotStore(uca, id, {
+            shotId: id,
+            shotName: data.shotName,
+            status: 'ready',
+            tracks: data.tracks,
+            broadcastingTrackIds: [],
+          });
 
-        const transport = await this.mediasoupRouter.createWebRtcTransport({
-          listenIps: [{ ip: '0.0.0.0', announcedIp: process.env.PUBLIC_IP || '127.0.0.1' }],
-          enableUdp: true,
-          enableTcp: true,
-        });
-        const shotPeer: MediaRoomPeer = {
-          transport,
-          trackProducers: new Map(),
-        };
-        mediaRoom.peers.set(id, shotPeer);
-        mediaRoom.shots.set(id, shotPeer);
+          const transport = await this.mediasoupRouter.createWebRtcTransport({
+            listenIps: [{ ip: '0.0.0.0', announcedIp: process.env.PUBLIC_IP || '127.0.0.1' }],
+            enableUdp: true,
+            enableTcp: true,
+          });
+          const shotPeer: MediaRoomPeer = {
+            transport,
+            trackProducers: new Map(),
+          };
+          mediaRoom.peers.set(id, shotPeer);
+          mediaRoom.shots.set(id, shotPeer);
 
-        console.log(`[socket] [/shot] [confirmReady] [${uca}:${id}] joined shot: ${data.shotName}`);
+          console.log(`[socket] [/shot] [confirmReady] [${uca}:${id}] joined shot: ${data.shotName}`);
 
-        return {
-          transport: {
-            id: shotPeer.transport.id,
-            iceParameters: shotPeer.transport.iceParameters,
-            iceCandidates: shotPeer.transport.iceCandidates,
-            dtlsParameters: shotPeer.transport.dtlsParameters,
-          },
-          routerRtpCapabilities: this.mediasoupRouter.rtpCapabilities,
-        };
-      });
+          return {
+            transport: {
+              id: shotPeer.transport.id,
+              iceParameters: shotPeer.transport.iceParameters,
+              iceCandidates: shotPeer.transport.iceCandidates,
+              dtlsParameters: shotPeer.transport.dtlsParameters,
+            },
+            routerRtpCapabilities: this.mediasoupRouter.rtpCapabilities,
+          };
+        },
+      );
 
       /**
        * cancelReady: 取消准备就绪
@@ -781,10 +785,7 @@ export default class SocketIOServer {
         const availableTracks = data.trackIds.filter((trackId) => {
           return tracks.some((track: any) => track.trackId === trackId);
         });
-        console.log(
-          `[socket] [/shot] [startBroadcast] [${uca}:${id}] checking available tracks:`,
-          availableTracks,
-        );
+        console.log(`[socket] [/shot] [startBroadcast] [${uca}:${id}] checking available tracks:`, availableTracks);
         if (availableTracks.length > 0) {
           console.log(
             `[socket] [/shot] [emit.requestStartBroadcast] [${uca}:${id}] requesting start broadcast to shot`,
@@ -877,6 +878,7 @@ export default class SocketIOServer {
           async () => {
             console.log(
               `[socket] [/shot] [emit.requestStopBroadcast] [${uca}:${id}] received shot ack, cleaning up producers:`,
+              data.shotId,
               data.trackIds,
             );
             // 仅清理 producers 相关，不关闭 transport
