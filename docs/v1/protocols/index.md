@@ -8,3 +8,4 @@ RL Broadcast Hub 是类似 RL Web 的 Node.js 服务端，主要负责提供与�
 - [推流（选手端）](./broadcaster.md)
 - [推流（Shot 端）](./shot.md)
 - [观看（导播端）](./director.md)
+- [精彩回放](./highlight-replay.md)

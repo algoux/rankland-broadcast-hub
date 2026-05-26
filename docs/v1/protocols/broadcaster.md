@@ -139,3 +139,7 @@ auth 字段：
 请求参数：无
 
 响应数据：无
+
+### 被动事件：requestCreateClip - 请求创建精彩回放切片
+
+精彩回放功能会复用 `/broadcaster` 命名空间，由服务端向指定选手端下发切片请求。完整 payload、ack、上传流程见 [精彩回放接口协议](./highlight-replay.md#broadcaster-被动事件requestcreateclip)。

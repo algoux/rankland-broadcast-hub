@@ -12,3 +12,4 @@ Kessoku Series 产品是专注于算竞赛事的直播导播工具套件。
 ## 设计文档
 
 - [KtB（选手端）设计文档](./ktb.md)
+- [精彩回放设计文档](./highlight-replay.md)
