@@ -21,4 +21,20 @@ export enum ErrCode {
   BroadcastMediaRoomPeerMissing = 200002,
   BroadcastMediaRoomRequiredTrackMissing = 200003,
   BroadcastMediaRoomCannotConsume = 200004,
+
+  // Highlight Replay
+  ClipAutomationNotFound = 300000,
+  ClipAutomationInvalidTrigger = 300001,
+  ClipTaskNotFound = 300010,
+  ClipTaskInvalidTimeWindow = 300011,
+  ClipTaskTargetOffline = 300012,
+  ClipTaskTrackNotFound = 300013,
+  ClipTaskRecordingRangeMissing = 300014,
+  ClipUploadNotFound = 300020,
+  ClipUploadOffsetMismatch = 300021,
+  ClipUploadChecksumMismatch = 300022,
+  ClipUploadExpired = 300023,
+  ClipMediaValidationFailed = 300030,
+  ClipNotFound = 300040,
+  ClipMediaRangeNotSatisfiable = 300041,
 }

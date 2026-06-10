@@ -19,4 +19,20 @@ registerErrCodeConfigs({
   [ErrCode.BroadcastMediaRoomPeerMissing]: '推流媒体房间 Peer 信息丢失',
   [ErrCode.BroadcastMediaRoomRequiredTrackMissing]: '所请求的推流轨道信息丢失',
   [ErrCode.BroadcastMediaRoomCannotConsume]: '无法消费所请求的推流轨道',
+
+  // Highlight Replay
+  [ErrCode.ClipAutomationNotFound]: '精彩回放自动化任务未找到',
+  [ErrCode.ClipAutomationInvalidTrigger]: '精彩回放自动化触发配置非法',
+  [ErrCode.ClipTaskNotFound]: '精彩回放任务未找到',
+  [ErrCode.ClipTaskInvalidTimeWindow]: '精彩回放时间窗口非法',
+  [ErrCode.ClipTaskTargetOffline]: '精彩回放目标选手端离线',
+  [ErrCode.ClipTaskTrackNotFound]: '精彩回放目标轨道未找到',
+  [ErrCode.ClipTaskRecordingRangeMissing]: '选手端本地录制无法覆盖请求时间窗',
+  [ErrCode.ClipUploadNotFound]: '精彩回放上传会话未找到',
+  [ErrCode.ClipUploadOffsetMismatch]: '精彩回放上传偏移不一致',
+  [ErrCode.ClipUploadChecksumMismatch]: '精彩回放上传校验和不一致',
+  [ErrCode.ClipUploadExpired]: '精彩回放上传会话已过期',
+  [ErrCode.ClipMediaValidationFailed]: '精彩回放媒体文件校验失败',
+  [ErrCode.ClipNotFound]: '精彩回放切片未找到',
+  [ErrCode.ClipMediaRangeNotSatisfiable]: '精彩回放媒体 Range 不可满足',
 });

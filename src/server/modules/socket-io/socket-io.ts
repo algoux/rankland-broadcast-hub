@@ -7,6 +7,9 @@ import LogicException from '@server/exceptions/logic.exception';
 import { errCodeConfigs } from '@server/err-code-configs';
 import { ErrCode } from '@common/enums/err-code.enum';
 import MediasoupWorker from '@server/lib/mediasoup-worker';
+import ClipConfig from '@server/configs/clips/clip.config';
+import ClipService from '@server/modules/clips/clip.service';
+import type { Clip, ClipTask, RequestCreateClipAck } from '@common/modules/clips';
 import type {
   AppData,
   ConsumerLayers,
@@ -50,6 +53,8 @@ export default class SocketIOServer {
   public constructor(
     @Inject() private readonly liveContestService: LiveContestService,
     @Inject() private readonly mediasoupWorker: MediasoupWorker,
+    @Inject(ClipService) private readonly clipService: ClipService,
+    @Inject(ClipConfig) private readonly clipConfig: ClipConfig,
   ) {
     this.mediasoupRouter = this.mediasoupWorker.routerMap.get('default');
   }
@@ -59,6 +64,8 @@ export default class SocketIOServer {
   public broadcasterNsp: Namespace<DefaultEventsMap, DefaultEventsMap, DefaultEventsMap, any>;
   // public viewerNsp: Namespace<DefaultEventsMap, DefaultEventsMap, DefaultEventsMap, any>;
   public shotNsp: Namespace<DefaultEventsMap, DefaultEventsMap, DefaultEventsMap, any>;
+  public clipsNsp: Namespace<DefaultEventsMap, DefaultEventsMap, DefaultEventsMap, any>;
+  private readonly clipDispatchingTaskIds: Set<string> = new Set();
 
   public init(server: http.Server) {
     this.io = new Server(server, {
@@ -71,6 +78,7 @@ export default class SocketIOServer {
     this.rootMount();
     this.broadcasterMount();
     this.shotMount();
+    this.clipsMount();
   }
 
   public rootMount() {
@@ -215,6 +223,10 @@ export default class SocketIOServer {
         this.broadcasterMediaRooms.set(roomKey, room);
         console.log(`[socket] [/broadcaster] [confirmReady] [${uca}:${userId}:${id}] created media room: ${roomKey}`);
         console.log(`[socket] [/broadcaster] [confirmReady] [${uca}:${userId}:${id}] joined broadcaster: ${id}`);
+
+        this.dispatchPendingClipTasks(uca, userId).catch((error) => {
+          console.error(`[socket] [/broadcaster] [confirmReady] [${uca}:${userId}:${id}] clip dispatch failed:`, error);
+        });
 
         return {
           transport: {
@@ -506,6 +518,74 @@ export default class SocketIOServer {
           },
         );
       });
+    });
+  }
+
+  public clipsMount() {
+    this.clipsNsp = this.io.of('/clips');
+    this.clipsNsp.use(async (socket, next) => {
+      const uca = socket.handshake.headers['x-uca']?.toString() || socket.handshake.query.uca?.toString() || '';
+      const { directorToken } = socket.handshake.auth;
+      if (!uca) {
+        return next(getGuardErrorObject(new LogicException(ErrCode.IllegalParameters)));
+      }
+      if (!directorToken || directorToken !== process.env.AUTH_TOKEN) {
+        return next(getGuardErrorObject(new LogicException(ErrCode.InvalidAuthInfo)));
+      }
+      try {
+        const contestInfo = await this.liveContestService.findContestByAlias(uca);
+        if (!contestInfo) {
+          return next(getGuardErrorObject(new LogicException(ErrCode.LiveContestNotFound)));
+        }
+        next();
+      } catch (e) {
+        next(getGuardErrorObject(e));
+      }
+    });
+
+    this.clipService.on('clipTaskQueued', (task) => {
+      this.dispatchClipTask(task).catch((error) => {
+        console.error(`[socket] [/clips] dispatch queued task failed: ${task.taskId}`, error);
+      });
+    });
+    this.clipService.on('clipTaskUpdated', (task) => {
+      this.clipsNsp.to(this.getClipViewerRoomKey(task.uca)).emit('clipTaskUpdated', { task });
+    });
+    this.clipService.on('clipCreated', (clip) => {
+      this.emitClipCreated(clip).catch((error) => {
+        console.error(`[socket] [/clips] emit clipCreated failed: ${clip.clipId}`, error);
+      });
+    });
+    this.clipService.on('clipDeleted', (event) => {
+      this.clipsNsp.to(this.getClipViewerRoomKey(event.uca)).emit('clipDeleted', {
+        clipId: event.clipId,
+        status: event.status,
+      });
+    });
+
+    this.clipsNsp.on('connection', (socket) => {
+      const uca = socket.handshake.headers['x-uca']?.toString() || socket.handshake.query.uca?.toString() || '';
+      console.log(`[socket] [/clips] [connection] [${uca}]`, socket.id);
+
+      socket.on('disconnect', (reason) => {
+        console.log(`[socket] [/clips] [disconnect] [${uca}:${socket.id}]`, reason);
+      });
+
+      registerSocketEvent(
+        socket,
+        'subscribeClips',
+        async (data: { categories?: string[]; userIds?: string[] } | undefined) => {
+          socket.data.clipSubscription = {
+            categories: data?.categories || [],
+            userIds: data?.userIds || [],
+          };
+          socket.join(this.getClipViewerRoomKey(uca));
+          return {
+            subscribed: true,
+            serverTimestamp: Date.now(),
+          };
+        },
+      );
     });
   }
 
@@ -921,6 +1001,10 @@ export default class SocketIOServer {
     return `shot:${uca}:${shotId}`;
   }
 
+  private getClipViewerRoomKey(uca: string) {
+    return `clips:${uca}`;
+  }
+
   private getBroadcasterMediaRoomKey(uca: string, userId: string) {
     return `${uca}:${userId}`;
   }
@@ -962,6 +1046,75 @@ export default class SocketIOServer {
       }
     }
     this.liveContestService.delShotStore(uca, id);
+  }
+
+  private async dispatchPendingClipTasks(uca: string, userId: string) {
+    const tasks = await this.clipService.findDispatchableTasks(uca, userId);
+    await Promise.all(tasks.map((task) => this.dispatchClipTask(task)));
+  }
+
+  private async dispatchClipTask(task: ClipTask) {
+    if (this.clipDispatchingTaskIds.has(task.taskId)) {
+      return;
+    }
+    this.clipDispatchingTaskIds.add(task.taskId);
+    try {
+      const roomKey = this.getBroadcasterLogicRoomKey(task.uca, task.userId);
+      const sockets = await this.broadcasterNsp.in(roomKey).allSockets();
+      if (sockets.size === 0) {
+        await this.clipService.markTaskDispatchFailed(
+          task.taskId,
+          'target_offline',
+          'broadcaster is not connected or ready',
+          true,
+        );
+        return;
+      }
+
+      const payload = await this.clipService.beginTaskDispatch(task.taskId);
+      this.broadcasterNsp.to(roomKey).timeout(this.clipConfig.requestAckTimeoutMs).emit(
+        'requestCreateClip',
+        payload,
+        async (err: Error | null, responses: RequestCreateClipAck[]) => {
+          if (err || !responses || responses.length === 0) {
+            await this.clipService.markTaskDispatchFailed(
+              task.taskId,
+              'socket_timeout',
+              err?.message || 'requestCreateClip ack timeout',
+              true,
+            );
+            return;
+          }
+          const ack = responses[0];
+          if (!ack.accepted) {
+            await this.clipService.markTaskDispatchFailed(
+              task.taskId,
+              ack.errorCode || 'client_rejected',
+              ack.errorMessage,
+              isRetryableClipDispatchError(ack.errorCode),
+            );
+          }
+        },
+      );
+    } finally {
+      this.clipDispatchingTaskIds.delete(task.taskId);
+    }
+  }
+
+  private async emitClipCreated(clip: Clip) {
+    const sockets = await this.clipsNsp.in(this.getClipViewerRoomKey(clip.uca)).fetchSockets();
+    sockets.forEach((socket) => {
+      const subscription = socket.data.clipSubscription || {};
+      const categories: string[] = subscription.categories || [];
+      const userIds: string[] = subscription.userIds || [];
+      if (categories.length > 0 && !categories.includes(clip.category)) {
+        return;
+      }
+      if (userIds.length > 0 && !userIds.includes(clip.userId)) {
+        return;
+      }
+      socket.emit('clipCreated', { clip });
+    });
   }
 }
 
@@ -1007,4 +1160,17 @@ function wrapSocketHandler(event: string, handler: (data: any) => Promise<any> |
 
 function registerSocketEvent(socket: Socket, event: string, handler: (data: any) => Promise<any> | any) {
   socket.on(event, wrapSocketHandler(event, handler));
+}
+
+function isRetryableClipDispatchError(errorCode?: string): boolean {
+  if (!errorCode) {
+    return true;
+  }
+  return ![
+    'track_not_found',
+    'recording_range_missing',
+    'invalid_time_window',
+    'media_validation_failed',
+    'upload_checksum_mismatch',
+  ].includes(errorCode);
 }

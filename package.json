@@ -7,6 +7,7 @@
   "scripts": {
     "preinstall": "npx only-allow pnpm",
     "test": "echo \"Error: no test specified\" && exit 1",
+    "test:clips": "vitest run tests/clips",
     "init": "pnpm i --frozen-lockfile",
     "dev:start": "cross-env NODE_ENV=development tsnd --respawn --rs --transpile-only -P src/server/tsconfig.json --unhandled-rejections=warn --inspect=127.0.0.1:9232 src/server/index.ts",
     "dev": "npm run dev:start",
@@ -27,6 +28,7 @@
     "@algoux/standard-ranklist-utils": "^0.2.9",
     "@koa/cors": "^5.0.0",
     "axios": "^0.26.1",
+    "better-sqlite3": "9.6.0",
     "bwcx-api": "^1.0.1",
     "bwcx-common": "^1.0.1",
     "bwcx-core": "^1.0.1",
@@ -34,11 +36,11 @@
     "chalk": "^4.1.2",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.13.2",
+    "ioredis": "^5.8.2",
     "koa-connect": "^2.1.0",
     "koa-favicon": "^2.1.0",
     "koa-mount": "^4.0.0",
     "koa-static": "^5.0.0",
-    "ioredis": "^5.8.2",
     "lodash": "^4.17.21",
     "long": "^4.0.0",
     "mediasoup": "~3.13.24",
@@ -53,6 +55,7 @@
   "devDependencies": {
     "@babel/core": "^7.23.7",
     "@babel/eslint-parser": "^7.23.3",
+    "@types/better-sqlite3": "7.6.13",
     "@types/koa-favicon": "^2.0.21",
     "@types/lodash": "^4.17.1",
     "@types/long": "^4.0.2",
@@ -69,7 +72,9 @@
     "prettier": "^2.5.1",
     "rimraf": "^4",
     "ts-node-dev": "^1.1.8",
-    "typescript": "~4.6.2"
+    "typescript": "~4.6.2",
+    "vite": "4.5.3",
+    "vitest": "0.34.6"
   },
   "engines": {
     "node": "^16.0.0",
