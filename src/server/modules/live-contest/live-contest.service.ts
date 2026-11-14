@@ -20,6 +20,23 @@ export interface LiveContest {
   contributors: srk.Contributor[];
 }
 
+/** RL API v2 `GET /public/contests/:uk` 响应中 Hub 用到的字段 */
+interface RlContestResp {
+  uk: string;
+  name: string;
+  title: srk.I18NStringSet;
+  startAt: string;
+  duration: srk.TimeDuration;
+  frozenDuration: srk.TimeDuration | null;
+  banner: srk.Image | srk.ImageWithLink | null;
+  refLinks: srk.LinkWithTitle[] | null;
+  problems: srk.Problem[] | null;
+  markers: srk.Marker[] | null;
+  series: srk.RankSeries[] | null;
+  sorter: srk.Sorter | null;
+  contributors?: srk.Contributor[];
+}
+
 export type LiveContestMember = User & {
   banned: boolean;
   broadcasterToken?: string;
@@ -65,7 +82,7 @@ export default class LiveContestService {
 
   public constructor(@Inject() private readonly redisClient: RedisClient) {
     this.redis = this.redisClient.getClient();
-    this.baseUrl = (process.env.RL_API_URL || 'https://rl-api-v2.algoux.cn/api').trim();
+    this.baseUrl = (process.env.RL_API_URL || 'https://rl.algoux.cn/api/v2').trim();
 
     const httpAgent = new http.Agent({
       keepAlive: true,
@@ -115,10 +132,26 @@ export default class LiveContestService {
 
   public async findContestByAlias(alias: string): Promise<LiveContest | null> {
     try {
-      const res = await this.apiClient.get<LiveContest>('/getLiveContest', {
-        params: { alias },
-      });
-      return res.data;
+      // 管理接口会返回已删除的比赛，比赛信息走公开接口
+      const res = await this.apiClient.get<RlContestResp>(`/public/contests/${encodeURIComponent(alias)}`);
+      const c = res.data;
+      return {
+        alias: c.uk,
+        name: c.name,
+        contest: {
+          title: c.title,
+          startAt: c.startAt,
+          duration: c.duration,
+          frozenDuration: c.frozenDuration ?? undefined,
+          banner: c.banner ?? undefined,
+          refLinks: c.refLinks ?? undefined,
+        },
+        problems: c.problems ?? [],
+        markers: c.markers ?? [],
+        series: c.series ?? [],
+        sorter: c.sorter ?? undefined,
+        contributors: c.contributors ?? [],
+      };
     } catch (error) {
       if (error instanceof LogicException) {
         if (error.code === ErrCode.LiveContestNotFound) {
@@ -141,9 +174,9 @@ export default class LiveContestService {
 
   public async findContestMemberById(alias: string, userId: string): Promise<LiveContestMember | null> {
     try {
-      const res = await this.apiClient.get<LiveContestMember>('/getContestMember', {
-        params: { alias, userId },
-      });
+      const res = await this.apiClient.get<LiveContestMember>(
+        `/contests/${encodeURIComponent(alias)}/users/${encodeURIComponent(userId)}`,
+      );
       return res.data;
     } catch (error) {
       if (error instanceof LogicException) {
