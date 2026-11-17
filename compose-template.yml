@@ -17,5 +17,8 @@ services:
       - RL_API_URL=
       - RL_API_TOKEN=your-rl-api-token
       - PUBLIC_IP=your-public-ip
+      # 精彩回放切片与 SQLite，须挂载到宿主机，否则重新部署会丢失
+      - CLIP_STORAGE_DIR=/data/clips
     volumes:
       - /your-logs-path/rankland-broadcast-hub:/root/.pm2/logs
+      - /your-data-path/rankland-broadcast-hub/clips:/data/clips
